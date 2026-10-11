@@ -68,8 +68,10 @@ class Reset(commands.Cog):
 
     @app_commands.command(name="reset", description="Delete everything the setup wizard created")
     @app_commands.guild_only()
-    @app_commands.default_permissions(manage_guild=True)
-    @app_commands.checks.has_permissions(manage_guild=True)
+    # The bot creates/deletes channels and roles for the invoker, so they must be
+    # allowed to do that themselves; Manage Server alone isn't enough.
+    @app_commands.default_permissions(manage_guild=True, manage_channels=True, manage_roles=True)
+    @app_commands.checks.has_permissions(manage_guild=True, manage_channels=True, manage_roles=True)
     async def reset(self, interaction: discord.Interaction) -> None:
         guild = interaction.guild
         storage = self.bot.storage

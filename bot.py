@@ -52,7 +52,9 @@ class SetupBot(commands.Bot):
     async def on_app_command_error(self, interaction: discord.Interaction,
                                    error: app_commands.AppCommandError) -> None:
         if isinstance(error, app_commands.MissingPermissions):
-            text = "You need the **Manage Server** permission to use this command."
+            missing = ", ".join(p.replace("_", " ").replace("guild", "server").title()
+                                for p in error.missing_permissions)
+            text = f"You need these permissions to use this command: **{missing}**."
         elif isinstance(error, app_commands.NoPrivateMessage):
             text = "This command only works inside a server."
         else:
