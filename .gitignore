@@ -1,0 +1,15 @@
+# Secrets
+.env
+
+# Bot data (IDs of created channels/roles per guild)
+data/
+*.db
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# OS
+.DS_Store
