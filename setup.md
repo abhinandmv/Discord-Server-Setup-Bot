@@ -78,7 +78,7 @@ With this ID set, slash commands appear instantly instead of after up to an hour
 In a terminal, inside the project folder:
 
 ```bash
-cd discord-setup-wizard      # the folder you cloned / downloaded
+cd Discord-Server-Setup-Bot  # the folder you cloned / downloaded
 cp .env.example .env
 open -e .env                 # macOS; on Windows use: notepad .env
 ```
@@ -162,7 +162,7 @@ The README has the full testing checklist.
 | Commands appear twice | You synced globally once and also to the guild. Harmless; the global copies can be cleared later. |
 | "I'm missing some permissions" | Re-invite with the URL from Step 4, or enable the listed permissions on the bot's role. |
 | "Missing permissions" errors while building | The bot's role is too low. Repeat Step 5. |
-| "You need the Manage Server permission" | Run `/setup` from an account with Manage Server (the server owner always has it). |
+| "You need these permissions to use this command" | `/setup` and `/reset` need **Manage Server, Manage Channels and Manage Roles** (the server owner has all of them). |
 | `ModuleNotFoundError: discord` | Activate the venv first: `source .venv/bin/activate`. |
 | `CERTIFICATE_VERIFY_FAILED` (macOS) | Run `"/Applications/Python 3.x/Install Certificates.command"` once. |
 

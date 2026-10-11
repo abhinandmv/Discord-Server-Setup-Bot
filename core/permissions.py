@@ -115,3 +115,15 @@ def is_safe_self_assign_role(role: discord.Role) -> bool:
     if role.is_default() or role.managed:
         return False
     return (role.permissions.value & discord.Permissions.elevated().value) == 0
+
+
+def can_hand_out(actor: discord.Member, role: discord.Role) -> bool:
+    """Could ``actor`` assign this role themselves? (owner, or Manage Roles and above it)
+
+    Used before turning an *existing* role into a self-assign role: otherwise
+    the wizard would let every member grab a role (e.g. a "Verified" access
+    role) that even the admin running /setup isn't allowed to give out.
+    """
+    if actor.guild.owner_id == actor.id:
+        return True
+    return actor.guild_permissions.manage_roles and role < actor.top_role

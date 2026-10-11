@@ -49,8 +49,8 @@ Built with [discord.py](https://github.com/Rapptz/discord.py) 2.x.
 Short version:
 
 ```bash
-git clone https://github.com/<your-username>/<your-repo>.git
-cd <your-repo>
+git clone https://github.com/abhinandmv/Discord-Server-Setup-Bot.git
+cd Discord-Server-Setup-Bot
 
 python3 -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
@@ -97,8 +97,8 @@ python bot.py
 
 | Command | Who can use it | What it does |
 |---|---|---|
-| `/setup` | Members with **Manage Server** | Runs the setup wizard. Only you can see the wizard messages. |
-| `/reset` | Members with **Manage Server** | Deletes everything the bot created, after you confirm. |
+| `/setup` | Members with **Manage Server + Manage Channels + Manage Roles** | Runs the setup wizard. Only you can see the wizard messages. |
+| `/reset` | Members with **Manage Server + Manage Channels + Manage Roles** | Deletes everything the bot created, after you confirm. |
 
 ### For admins: setting up your server
 
@@ -218,7 +218,13 @@ More in [setup.md](setup.md#troubleshooting).
 - **Fresh start** can't delete the rules or updates channels that Discord requires on **Community** servers. They're skipped and listed as a warning.
 - **Muted** is applied to every pre-existing channel, one API call each, so this is slow on very large servers.
 - **Buttons and reactions** on the role menu work independently. If someone adds a role by reacting and removes it with the button, their reaction stays.
-- **Self-assign safety:** a role with moderator or admin permissions is never added to the self-assign menu.
+- **Permission safety:** `/setup` and `/reset` require Manage Server, Manage Channels **and** Manage Roles, so nobody can use the bot to do more than they could themselves. An existing role is only added to the self-assign menu if it has no moderator/admin permissions **and** the person running `/setup` could assign it themselves.
 - **Role icons** (images next to names) need Server Boost level 2, so the role emoji are part of the names instead.
 - **Limits per run:** 10 extra channels, 20 subjects, 20 self-assign roles.
 - The bot only runs while `python bot.py` is running. For 24/7 uptime, host it on a VPS or a service such as Railway or fly.io.
+
+---
+
+## 📄 License
+
+Released under the [MIT License](LICENSE).

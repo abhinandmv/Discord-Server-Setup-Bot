@@ -187,8 +187,10 @@ class Wizard(commands.Cog):
     # ------------------------------------------------------------------ #
     @app_commands.command(name="setup", description="Run the server setup wizard")
     @app_commands.guild_only()
-    @app_commands.default_permissions(manage_guild=True)
-    @app_commands.checks.has_permissions(manage_guild=True)
+    # The bot creates/deletes channels and roles for the invoker, so they must be
+    # allowed to do that themselves; Manage Server alone isn't enough.
+    @app_commands.default_permissions(manage_guild=True, manage_channels=True, manage_roles=True)
+    @app_commands.checks.has_permissions(manage_guild=True, manage_channels=True, manage_roles=True)
     async def setup_command(self, interaction: discord.Interaction) -> None:
         guild = interaction.guild
         assert guild is not None
@@ -653,6 +655,14 @@ class Wizard(commands.Cog):
 
         async with lock:
             self.end(session)
+            perms = interaction.user.guild_permissions
+            if not (perms.manage_guild and perms.manage_channels and perms.manage_roles):
+                await interaction.response.edit_message(
+                    embed=discord.Embed(description="You no longer have Manage Server, Manage "
+                                                    "Channels and Manage Roles, so I stopped. "
+                                                    "Nothing was changed.", colour=ui.RED),
+                    view=None)
+                return
             missing = missing_bot_permissions(guild.me.guild_permissions)
             if missing:  # permissions may have changed while the wizard was open
                 await interaction.response.edit_message(embed=missing_permissions_embed(missing),
@@ -665,7 +675,8 @@ class Wizard(commands.Cog):
                 embed=ui.progress_embed(title, "Starting", 0, 1, 0, 1), view=None)
             reporter = ui.ProgressReporter(interaction, title)
             try:
-                result = await Builder(guild, plan, self.bot.storage, progress=reporter).run()
+                result = await Builder(guild, plan, self.bot.storage, progress=reporter,
+                                       actor=interaction.user).run()
             except Exception:
                 log.exception("Build crashed in guild %s", guild.id)
                 await reporter.finish(discord.Embed(

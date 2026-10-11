@@ -10,8 +10,8 @@ from typing import Awaitable, Callable
 import discord
 
 import templates
-from core.permissions import (PermissionContext, is_safe_self_assign_role, muted_overwrite,
-                              overwrites_for)
+from core.permissions import (PermissionContext, can_hand_out, is_safe_self_assign_role,
+                              muted_overwrite, overwrites_for)
 from core.plan import Plan, RoleSpec, split_leading_emoji
 from core.retry import call_with_retry, describe_error
 from core.storage import Storage
@@ -41,8 +41,10 @@ def normalize_emoji(emoji: str) -> str:
 
 class Builder:
     def __init__(self, guild: discord.Guild, plan: Plan, storage: Storage, *,
-                 progress: ProgressCallback | None = None, delay: float = 0.6) -> None:
+                 progress: ProgressCallback | None = None, delay: float = 0.6,
+                 actor: discord.Member | None = None) -> None:
         self.guild = guild
+        self.actor = actor  # the admin who ran /setup; limits which existing roles we expose
         self.plan = plan
         self.storage = storage
         self.progress = progress
@@ -168,10 +170,11 @@ class Builder:
 
     async def _ensure_role(self, spec: RoleSpec) -> discord.Role | None:
         if self._reusing(spec) and (role := self.guild.get_role(spec.existing_id)):
-            if spec.self_assign and not is_safe_self_assign_role(role):
+            if spec.self_assign and not self._may_expose(role):
                 self.result.warnings.append(
-                    f"@{role.name} already exists with moderator/admin permissions, so it was "
-                    "left out of the self-assign menu.")
+                    f"@{role.name} already exists and isn't safe to make self-assignable (it has "
+                    "moderator permissions, or you couldn't assign it yourself), so it was left "
+                    "out of the self-assign menu.")
                 return None
             self.result.reused.append(f"@{role.name}")
             return role
@@ -184,6 +187,13 @@ class Builder:
             delay=self.delay)
         self._track(role, "role", role.name)
         return role
+
+    def _may_expose(self, role: discord.Role) -> bool:
+        """May this pre-existing role become self-assignable by every member?"""
+        if not is_safe_self_assign_role(role):
+            return False
+        made_by_bot = any(i.item_id == role.id for i in self.storage.items(self.guild.id))
+        return made_by_bot or (self.actor is not None and can_hand_out(self.actor, role))
 
     def _grantable(self, spec: RoleSpec) -> discord.Permissions:
         """A bot can only grant permissions it has itself; drop the rest and warn."""
