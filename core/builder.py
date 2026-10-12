@@ -17,7 +17,7 @@ from core.permissions import (PermissionContext, can_hand_out, grantable_by, is_
 from core.plan import Plan, RoleSpec, split_leading_emoji
 from core.retry import call_with_retry, describe_error
 from core.storage import Storage
-from core.wipe import wipe, wipe_targets
+from core.wipe import report_wipe, wipe, wipe_targets
 
 log = logging.getLogger(__name__)
 
@@ -61,13 +61,15 @@ class Builder:
         self._created_keys: set[str] = set()  # plan role keys created (not reused) this run
         self._new_channels: set[int] = set()  # channels created (not reused) this run
         self._deleted_ids: set[int] = set()
+        self._wipe_complete = True
         self._done = 0
         self._total = 0
 
     # ------------------------------------------------------------------ #
     async def run(self) -> BuildResult:
-        wipe_channels, wipe_roles = (wipe_targets(self.guild, self.storage, self.actor)
-                                     if self.plan.wipe else ([], []))
+        targets = wipe_targets(self.guild, self.storage, self.actor) if self.plan.wipe else None
+        wipe_channels = targets.channels if targets else []
+        wipe_roles = targets.roles if targets else []
         posts = (int(bool(self.plan.reaction_groups))
                  + int(self.plan.ticket_role is not None) + int("verification" in self.plan.features)
                  + int("rules_welcome" in self.plan.features))  # upper bound; rules may be skipped
@@ -77,13 +79,13 @@ class Builder:
         if self.plan.wipe:
             self.result.backup_id = self.storage.add_backup(
                 self.guild.id, "Before fresh start", snapshot(self.guild))
-            wiped = await wipe(self.guild, self.storage, wipe_channels, wipe_roles,
+            wiped = await wipe(self.guild, self.storage, targets,
                                reason=f"{REASON} (fresh start)", delay=self.delay,
                                tick=self._tick)
             self.result.deleted = wiped.deleted
             self._deleted_ids = wiped.deleted_ids
-            if wiped.failed:
-                self.result.warnings.append("Couldn't delete: " + ", ".join(wiped.failed))
+            self._wipe_complete = wiped.complete
+            report_wipe(self.result.warnings, wiped)
 
         muted = self.plan.role("muted")
         # Snapshot before we create anything: these are the channels a human made
@@ -449,7 +451,15 @@ class Builder:
         member = self._bot_can_give("member")
         if member is not None:
             store.set_setting(gid, "member_role_id", str(member.id))
-        flag("verify_enabled", self.ctx.gate is not None)
+        # Fail closed: if old (possibly gated) channels survived the fresh start,
+        # keep verification on rather than switching on auto-role.
+        kept_gate = (self.ctx.gate is None and not self._wipe_complete
+                     and store.get_setting(gid, "verify_enabled") == "1")
+        if kept_gate:
+            self.result.warnings.append(
+                "Some old channels couldn't be deleted, so verification stays on (no auto-role) "
+                "until they're gone. Nobody gets into them without verifying.")
+        flag("verify_enabled", self.ctx.gate is not None or kept_gate)
         flag("leveling_enabled", "leveling" in features)
         if "leveling" in features:
             rewards = {}

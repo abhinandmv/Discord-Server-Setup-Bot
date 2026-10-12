@@ -674,8 +674,8 @@ def validate() -> None:
 
     if len(SERVER_TYPES) > 20:
         problems.append("at most 20 server types fit on the wizard's buttons")
-    if len(FEATURES) > 25:
-        problems.append("at most 25 features fit in a select menu")
+    if len(FEATURES) > 15:
+        problems.append("at most 15 features fit on the wizard's toggle buttons (3 rows of 5)")
 
     if problems:
         raise ValueError("Invalid templates:\n  - " + "\n  - ".join(problems))

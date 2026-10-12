@@ -23,7 +23,7 @@ import discord
 from core.permissions import grantable_by
 from core.retry import call_with_retry, describe_error
 from core.storage import Storage
-from core.wipe import Tick, wipe, wipe_targets
+from core.wipe import report_wipe, wipe, wipe_targets
 
 log = logging.getLogger(__name__)
 
@@ -255,27 +255,26 @@ class LayoutApplier:
         self.roles_by_name: dict[str, discord.Role] = {}
         self._dropped_perms = 0
         self._missing_targets = 0
+        self._above_actor = 0
         self._done = 0
         self._total = 0
 
     async def run(self) -> LayoutResult:
-        channels, roles = (wipe_targets(self.guild, self.storage, self.actor,
-                                        include_roles=self.mode == "template")
-                           if self.wipe else ([], []))
+        targets = (wipe_targets(self.guild, self.storage, self.actor,
+                                include_roles=self.mode == "template") if self.wipe else None)
         n_roles, n_cats, n_chans = layout_counts(self.layout)
-        self._total = len(channels) + len(roles) + n_cats + n_chans
+        self._total = n_cats + n_chans + (len(targets.channels) + len(targets.roles) if targets else 0)
         if self.mode == "template":
             self._total += n_roles
 
         if self.wipe:
             self.result.backup_id = self.storage.add_backup(
                 self.guild.id, f"Before {self.reason.lower()}", snapshot(self.guild))
-            wiped = await wipe(self.guild, self.storage, channels, roles,
+            wiped = await wipe(self.guild, self.storage, targets,
                                reason=f"{self.reason} (fresh start)", delay=self.delay,
                                tick=self._tick)
             self.result.deleted = wiped.deleted
-            if wiped.failed:
-                self.result.warnings.append("Couldn't delete: " + ", ".join(wiped.failed))
+            report_wipe(self.result.warnings, wiped)
 
         if self.mode == "template":
             await self._create_roles()
@@ -285,6 +284,10 @@ class LayoutApplier:
             self.result.warnings.append(
                 f"{self._dropped_perms} permission setting(s) were left out because you or I "
                 "don't have those permissions.")
+        if self._above_actor:
+            self.result.warnings.append(
+                f"{self._above_actor} permission overwrite(s) for roles at or above your highest "
+                "role were left out. Someone higher up can add them.")
         if self._missing_targets:
             self.result.warnings.append(
                 f"{self._missing_targets} permission overwrite(s) were skipped because their "
@@ -354,12 +357,25 @@ class LayoutApplier:
             return discord.Object(id=ow["id"], type=discord.Member)
         return None
 
+    def _may_set_for(self, target) -> bool:
+        """Discord only lets you edit overwrites for roles below your highest role
+        (unless you own the server); the bot must not be a way around that."""
+        if not hasattr(target, "is_default") or target.is_default():
+            return True  # @everyone, members and the bot itself
+        actor = self.actor
+        if actor.guild.owner_id == actor.id:
+            return True
+        return target < actor.top_role
+
     def _build_overwrites(self, entries: list[dict]) -> dict:
         out = {}
         for ow in entries:
             target = self._target(ow)
             if target is None:
                 self._missing_targets += 1
+                continue
+            if not self._may_set_for(target):
+                self._above_actor += 1
                 continue
             allow, deny = self._cap(ow["allow"], ow["deny"])
             out[target] = discord.PermissionOverwrite.from_pair(discord.Permissions(allow),

@@ -19,9 +19,15 @@ from discord.ext import commands, tasks
 
 from core import ui
 from core.modlog import log_event
-from core.permissions import is_access_role, is_safe_self_assign_role
+import templates
+from core.permissions import (MOD_COMMAND_PERMISSIONS, is_access_role, is_safe_self_assign_role,
+                              mod_command)
 
 log = logging.getLogger(__name__)
+
+# The staff role must be able to use every moderation command.
+assert set(MOD_COMMAND_PERMISSIONS.values()) <= set(templates.DEFAULT_ROLES["staff"]["permissions"]), \
+    "templates.DEFAULT_ROLES['staff'] is missing a moderation permission"
 
 _DURATION = re.compile(r"^\s*(\d+)\s*(s|sec|m|min|h|hr|hour|d|day|w|week)s?\s*$", re.IGNORECASE)
 _UNIT_SECONDS = {"s": 1, "sec": 1, "m": 60, "min": 60, "h": 3600, "hr": 3600, "hour": 3600,
@@ -85,8 +91,7 @@ class Moderation(commands.Cog):
     # ------------------------------------------------------------------ #
     @app_commands.command(name="mute", description="Stop a member from typing, reacting and speaking")
     @app_commands.guild_only()
-    @app_commands.default_permissions(moderate_members=True)
-    @app_commands.checks.has_permissions(moderate_members=True)
+    @mod_command("mute")
     @app_commands.describe(member="Who to mute", duration="e.g. 10m, 2h, 1d (empty = until /unmute)",
                            reason="Shown in the mod log")
     async def mute(self, interaction: discord.Interaction, member: discord.Member,
@@ -122,8 +127,7 @@ class Moderation(commands.Cog):
 
     @app_commands.command(name="unmute", description="Remove a member's mute")
     @app_commands.guild_only()
-    @app_commands.default_permissions(moderate_members=True)
-    @app_commands.checks.has_permissions(moderate_members=True)
+    @mod_command("unmute")
     async def unmute(self, interaction: discord.Interaction, member: discord.Member) -> None:
         guild = interaction.guild
         problem = target_problem(interaction.user, member)
@@ -186,8 +190,7 @@ class Moderation(commands.Cog):
     # ------------------------------------------------------------------ #
     @app_commands.command(name="warn", description="Give a member a formal warning")
     @app_commands.guild_only()
-    @app_commands.default_permissions(moderate_members=True)
-    @app_commands.checks.has_permissions(moderate_members=True)
+    @mod_command("warn")
     async def warn(self, interaction: discord.Interaction, member: discord.Member,
                    reason: app_commands.Range[str, 1, 500]) -> None:
         guild = interaction.guild
@@ -214,8 +217,7 @@ class Moderation(commands.Cog):
 
     @app_commands.command(name="warnings", description="List a member's warnings")
     @app_commands.guild_only()
-    @app_commands.default_permissions(moderate_members=True)
-    @app_commands.checks.has_permissions(moderate_members=True)
+    @mod_command("warnings")
     async def warnings(self, interaction: discord.Interaction, member: discord.Member) -> None:
         rows = self.bot.storage.warnings(interaction.guild.id, member.id)
         lines = [f"**#{len(rows) - i}** · {row['created_at'][:10]} · by <@{row['moderator_id']}>\n"
@@ -227,8 +229,7 @@ class Moderation(commands.Cog):
 
     @app_commands.command(name="clearwarnings", description="Delete all of a member's warnings")
     @app_commands.guild_only()
-    @app_commands.default_permissions(moderate_members=True)
-    @app_commands.checks.has_permissions(moderate_members=True)
+    @mod_command("clearwarnings")
     async def clearwarnings(self, interaction: discord.Interaction, member: discord.Member) -> None:
         problem = target_problem(interaction.user, member)
         if problem:
@@ -245,8 +246,7 @@ class Moderation(commands.Cog):
     # ------------------------------------------------------------------ #
     @app_commands.command(name="purge", description="Bulk-delete recent messages in this channel")
     @app_commands.guild_only()
-    @app_commands.default_permissions(manage_messages=True)
-    @app_commands.checks.has_permissions(manage_messages=True)
+    @mod_command("purge")
     @app_commands.describe(amount="How many recent messages to check (1-100)",
                            member="Only delete messages from this member")
     async def purge(self, interaction: discord.Interaction, amount: app_commands.Range[int, 1, 100],
