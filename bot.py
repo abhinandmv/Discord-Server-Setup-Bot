@@ -17,14 +17,19 @@ from core.storage import Storage
 
 log = logging.getLogger("setup_bot")
 
-EXTENSIONS = ("cogs.wizard", "cogs.reset", "cogs.role_menu", "cogs.tickets")
+EXTENSIONS = ("cogs.wizard", "cogs.reset", "cogs.role_menu", "cogs.tickets", "cogs.welcome",
+              "cogs.leveling", "cogs.stats", "cogs.moderation", "cogs.backup",
+              "cogs.server_templates")
 
 
 class SetupBot(commands.Bot):
     def __init__(self) -> None:
-        # Default intents are enough: no privileged intents (members, message content) needed.
-        super().__init__(command_prefix=commands.when_mentioned, intents=discord.Intents.default(),
-                         help_command=None)
+        # Server Members is the only privileged intent needed (welcome messages,
+        # verification, auto-role, join/leave log). Message Content is NOT needed:
+        # leveling only counts messages.
+        intents = discord.Intents.default()
+        intents.members = True
+        super().__init__(command_prefix=commands.when_mentioned, intents=intents, help_command=None)
         self.storage = Storage(config.DATABASE_PATH)
         self._guild_locks: defaultdict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
 
@@ -79,7 +84,12 @@ def main() -> None:
     if not config.DISCORD_TOKEN:
         sys.exit("DISCORD_TOKEN is not set. Copy .env.example to .env and add your bot token.")
     templates.validate()  # fail fast on template typos
-    SetupBot().run(config.DISCORD_TOKEN, log_handler=None)
+    try:
+        SetupBot().run(config.DISCORD_TOKEN, log_handler=None)
+    except discord.PrivilegedIntentsRequired:
+        sys.exit("The bot needs the Server Members intent. Turn it on in the Developer Portal: "
+                 "your application -> Bot -> Privileged Gateway Intents -> Server Members Intent, "
+                 "then save and start the bot again.")
 
 
 if __name__ == "__main__":

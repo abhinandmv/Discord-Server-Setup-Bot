@@ -32,10 +32,12 @@ Still on the **Bot** page:
 | Public Bot | Off (recommended, so only you can invite it) |
 | Requires OAuth2 Code Grant | **Off** |
 | Presence Intent | Off |
-| Server Members Intent | Off |
+| Server Members Intent | **On** |
 | Message Content Intent | Off |
 
-This bot doesn't need any privileged intents. Click **Save Changes** if you changed anything.
+**Server Members Intent** lets the bot see people join and leave, which it needs for welcome messages, verification, giving new members their role, and the join/leave log. Without it the bot stops at startup with a message telling you to turn it on. Click **Save Changes**.
+
+> Bots in fewer than 100 servers can turn this on freely. Past 100 servers, Discord asks you to apply for it.
 
 ---
 
@@ -140,13 +142,17 @@ To undo everything the bot created, run `/reset` and confirm.
 
 Invite a second Discord account (or a friend) to the test server, then check:
 
+- [ ] When they join, the welcome channel greets them
+- [ ] With **Verification gate** on, they only see the welcome, rules and verify channels until they click **Verify**
 - [ ] They can read the announcements, rules and welcome channels but can't type there
 - [ ] They can't see the staff category
-- [ ] In the roles channel, clicking a button or reacting with an emoji gives them that role
+- [ ] In the reaction-roles channel, reacting with an emoji gives them that role (un-reacting removes it); in a "pick one" message, choosing another emoji swaps it
+- [ ] After chatting for a few minutes, `/rank` shows their XP
 - [ ] **Open a ticket** creates a private channel (and its category) that only they and the mods can see
 - [ ] They **can't** close their own ticket; a mod can, and the category disappears when the last ticket closes
-- [ ] After you give them the **🔇 Muted** role, they can't type or speak anywhere
-- [ ] After a bot restart (Ctrl+C, then `python bot.py`), the role and ticket buttons still work
+- [ ] After `/mute @them 1m`, they can't type or speak anywhere, and a minute later they can again
+- [ ] Moderation actions, tickets, joins and leaves appear in the mod-log channel
+- [ ] After a bot restart (Ctrl+C, then `python bot.py`), the role menu, verify and ticket buttons still work
 
 The README has the full testing checklist.
 
@@ -156,13 +162,14 @@ The README has the full testing checklist.
 
 | Problem | Fix |
 |---|---|
+| "The bot needs the Server Members intent" | Turn on **Server Members Intent** (Step 3), save, and start the bot again. |
 | `DISCORD_TOKEN is not set` | `.env` is missing or in the wrong folder. It must sit next to `bot.py`. |
 | `LoginFailure: Improper token` | Token copied wrong or reset since. Reset it again (Step 2) and update `.env`. |
 | `/setup` doesn't show up | Check that `TEST_GUILD_ID` is your server's ID and the log says "Synced … to test guild". Restart Discord with **Ctrl+R** (or **Cmd+R**). Make sure the invite URL included `applications.commands`. |
 | Commands appear twice | You synced globally once and also to the guild. Harmless; the global copies can be cleared later. |
 | "I'm missing some permissions" | Re-invite with the URL from Step 4, or enable the listed permissions on the bot's role. |
 | "Missing permissions" errors while building | The bot's role is too low. Repeat Step 5. |
-| "You need these permissions to use this command" | `/setup` and `/reset` need **Manage Server, Manage Channels and Manage Roles** (the server owner has all of them). |
+| "You need these permissions to use this command" | `/setup`, `/reset`, `/backup`, `/restore` and `/template` need **Manage Server, Manage Channels and Manage Roles** (the server owner has all of them). Moderation commands need **Timeout Members**; `/purge` needs **Manage Messages**. |
 | `ModuleNotFoundError: discord` | Activate the venv first: `source .venv/bin/activate`. |
 | `CERTIFICATE_VERIFY_FAILED` (macOS) | Run `"/Applications/Python 3.x/Install Certificates.command"` once. |
 
@@ -172,4 +179,4 @@ The README has the full testing checklist.
 
 1. Invite the bot to the real server with the same URL (Step 4) and move its role up (Step 5).
 2. Either change `TEST_GUILD_ID` to the real server's ID, or leave it **empty** to sync commands globally to every server the bot is in. Global sync can take up to an hour.
-3. Restart the bot. To keep it running 24/7 you'll need it on an always-on machine or a host such as a VPS, Railway or fly.io, not your laptop.
+3. Restart the bot. To keep it running 24/7 you'll need it on an always-on machine, not your laptop. The README's **Running 24/7** section shows how, using the included `Dockerfile`.

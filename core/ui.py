@@ -93,3 +93,36 @@ class ProgressReporter:
             log.info("Progress message no longer editable (%s); continuing without it", exc)
             self._broken = True
             return False
+
+
+class ConfirmDeleteModal(discord.ui.Modal):
+    """Typed confirmation for anything that deletes channels."""
+
+    def __init__(self, *, title: str, label: str, on_confirm, on_error=None) -> None:
+        super().__init__(title=title[:45], timeout=600)
+        self._on_confirm = on_confirm
+        self._on_error = on_error
+        self.confirm = discord.ui.TextInput(label=label[:45], placeholder="DELETE",
+                                            min_length=1, max_length=10)
+        self.add_item(self.confirm)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        if self.confirm.value.strip().upper() != "DELETE":
+            await interaction.response.send_message(
+                "Not confirmed, so nothing was deleted.", ephemeral=True)
+            return
+        await self._on_confirm(interaction)
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
+        log.exception("Error after delete confirmation", exc_info=error)
+        if self._on_error:
+            await self._on_error(interaction, error)
+            return
+        text = "⚠️ Something went wrong. Check the bot logs."
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(text, ephemeral=True)
+            else:
+                await interaction.response.send_message(text, ephemeral=True)
+        except discord.HTTPException:
+            pass
