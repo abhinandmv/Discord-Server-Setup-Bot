@@ -10,6 +10,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from core import ui
+from core.permissions import can_hand_out
 from core.retry import call_with_retry, describe_error
 from core.storage import TrackedItem
 
@@ -127,6 +128,13 @@ class Reset(commands.Cog):
 
             deleted, errors = 0, []
             for n, item in enumerate(items, 1):
+                role = guild.get_role(item.item_id) if item.kind == "role" else None
+                if role is not None and not can_hand_out(interaction.user, role):
+                    # Someone moved it above the invoker; they couldn't delete it themselves.
+                    errors.append(f"@{role.name}: it's above your highest role, so I left it. "
+                                  "Someone higher up can run /reset to remove it.")
+                    await reporter("Deleting", n, len(items), n, len(items))
+                    continue
                 try:
                     if await self._delete(guild, item, channel_ids):
                         deleted += 1

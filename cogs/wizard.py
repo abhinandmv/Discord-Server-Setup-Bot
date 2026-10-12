@@ -1,7 +1,7 @@
 """/setup: an interactive wizard that plans and builds roles, categories and channels.
 
 Flow: server type (buttons) -> features (multi-select) -> details (modal)
-      -> follow-ups (ticket role / subjects / self roles, only when relevant)
+      -> follow-ups (ticket role / subjects / reaction roles, only when relevant)
       -> build mode (fresh start or keep existing channels)
       -> duplicate check (if anything already exists) -> preview -> build.
 
@@ -11,6 +11,7 @@ Every step edits the same ephemeral message. One session exists per
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
@@ -25,8 +26,9 @@ import templates
 from core import ui
 from core.builder import Builder, BuildResult
 from core.permissions import PRESET_LABELS, missing_bot_permissions
-from core.plan import (MAX_EXTRA_CHANNELS, MAX_SELF_ROLES, MAX_SUBJECTS, Plan, WizardAnswers,
-                       build_plan, find_conflicts, followups_for, parse_list)
+from core.plan import (MAX_EXTRA_CHANNELS, MAX_ROLE_GROUPS, MAX_SELF_ROLES, MAX_SUBJECTS, Plan,
+                       WizardAnswers, build_plan, find_conflicts, followups_for,
+                       format_role_groups, parse_list, parse_role_groups)
 
 log = logging.getLogger(__name__)
 
@@ -121,23 +123,29 @@ class DetailsModal(discord.ui.Modal):
         await self.cog.report_error(interaction, error)
 
 
+def _join(items: list[str]) -> str:
+    return ", ".join(items)
+
+
 class ListModal(discord.ui.Modal):
-    """One paragraph field holding a comma-separated list (subjects, self roles)."""
+    """One paragraph field holding a list (subjects, grouped self roles)."""
 
     def __init__(self, cog: Wizard, session: WizardSession, *, step: str, attr: str,
-                 title: str, label: str, placeholder: str, limit: int) -> None:
+                 title: str, label: str, placeholder: str, limit: int,
+                 parse: Callable[[str], list] = parse_list,
+                 fmt: Callable[[list], str] = _join) -> None:
         super().__init__(title=title, timeout=TIMEOUT)
         self.cog, self.session = cog, session
-        self.step, self.attr, self.limit = step, attr, limit
+        self.step, self.attr, self.limit, self.parse = step, attr, limit, parse
         self.field = discord.ui.TextInput(
             label=label, style=discord.TextStyle.paragraph, placeholder=placeholder,
-            default=", ".join(getattr(session.answers, attr)) or None, max_length=1000)
+            default=fmt(getattr(session.answers, attr)) or None, max_length=1000)
         self.add_item(self.field)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         if not await self.cog.check_active(interaction, self.session):
             return
-        setattr(self.session.answers, self.attr, parse_list(self.field.value)[: self.limit])
+        setattr(self.session.answers, self.attr, self.parse(self.field.value)[: self.limit])
         self.session.answered.add(self.step)
         await self.cog.advance(interaction, self.session)
 
@@ -174,11 +182,12 @@ class Wizard(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
         self.sessions: dict[tuple[int, int], WizardSession] = {}
+        self._tasks: set[asyncio.Task] = set()
         # Follow-up questions referenced by templates.py ("followups": [...]).
         self.followups: dict[str, Callable[[discord.Interaction, WizardSession], Awaitable[None]]] = {
             "ticket_role": self.step_ticket_role,
             "subjects": self.step_subjects,
-            "self_roles": self.step_self_roles,
+            "reaction_roles": self.step_reaction_roles,
         }
         assert set(self.followups) == templates.FOLLOWUPS, "templates.FOLLOWUPS out of sync with wizard"
 
@@ -326,7 +335,7 @@ class Wizard(commands.Cog):
             a.features = list(t["default_features"])
             a.staff_role, a.member_role = t["staff_role"], t["member_role"]
             a.subjects = parse_list(t.get("default_subjects", ""))
-            a.self_roles = parse_list(t.get("default_self_roles", ""))
+            a.reaction_roles = parse_role_groups(t.get("default_reaction_roles", ""))
             a.ticket_role = None
         await self.step_features(interaction, session)
 
@@ -419,20 +428,27 @@ class Wizard(commands.Cog):
 
         embed = discord.Embed(
             title="🎫 Support tickets",
-            description="**Which role should be able to see support tickets?**\n"
-                        "Each ticket is a private channel visible only to this role and the "
-                        "member who opened it.",
+            description="**Which team handles support tickets?**\n"
+                        "Any member can open a ticket. Each ticket is a private channel that only "
+                        "the member who opened it and **this role** can see. This role is pinged "
+                        "when a ticket opens and is the one that can close it.\n\n"
+                        "Pick your staff/moderator role (pre-selected), then press **Next**.",
             colour=ui.BLURPLE)
         view = WizardView(self, session)
-        select = discord.ui.Select(placeholder="Choose the ticket role…", options=options, row=0)
+        select = discord.ui.Select(placeholder="Choose the ticket team…", options=options, row=0)
 
         async def on_select(i: discord.Interaction) -> None:
             a.ticket_role = select.values[0]
+            await i.response.defer()  # remembered; Next moves on
+
+        async def on_next(i: discord.Interaction) -> None:
+            a.ticket_role = a.ticket_role or current
             session.answered.add("ticket_role")
             await self.advance(i, session)
 
         select.callback = on_select
         view.add_item(select)
+        view.add_item(_button("Next", discord.ButtonStyle.primary, on_next, row=1))
         await self.render(interaction, session, embed, view)
 
     async def step_subjects(self, interaction: discord.Interaction, session: WizardSession) -> None:
@@ -448,25 +464,34 @@ class Wizard(commands.Cog):
         await self._render_list_step(interaction, session, embed, modal, "Enter subjects",
                                      attr="subjects", step="subjects")
 
-    async def step_self_roles(self, interaction: discord.Interaction, session: WizardSession) -> None:
+    async def step_reaction_roles(self, interaction: discord.Interaction,
+                                  session: WizardSession) -> None:
         embed = discord.Embed(
-            title="🏷️ Self-assign roles",
-            description=f"**Which roles can members give themselves?**\n"
-                        f"I'll create them (up to {MAX_SELF_ROLES}) and post a button menu in "
-                        f"**#roles**. Clicking a button toggles that role.",
+            title="✨ Reaction roles",
+            description=f"**Which roles can members get by reacting?**\n"
+                        f"These go in their own **reaction-roles** channel: one message per group "
+                        f"(up to {MAX_ROLE_GROUPS}, {MAX_SELF_ROLES} roles in total), each with its "
+                        "emoji already added. Members react to get a role and remove the reaction "
+                        "to drop it.\n\n"
+                        "Write **one group per line**: `Group: role, role`. Start each role with "
+                        "the emoji to react with (otherwise I pick one). Add **(pick one)** after a "
+                        "group name to allow only one role from it.",
             colour=ui.BLURPLE)
-        modal = partial(ListModal, self, session, step="self_roles", attr="self_roles",
-                        title="Self-assign roles", label="Role names (comma-separated)",
-                        placeholder="PC, Console, Event Pings", limit=MAX_SELF_ROLES)
-        await self._render_list_step(interaction, session, embed, modal, "Enter role names",
-                                     attr="self_roles", step="self_roles")
+        modal = partial(ListModal, self, session, step="reaction_roles", attr="reaction_roles",
+                        title="Reaction roles", label="One group per line: Group: role, role",
+                        placeholder="Hobbies: 🎵 Music, 📚 Books\nVibe (pick one): ☀️ Morning, 🦉 Night",
+                        limit=MAX_ROLE_GROUPS, parse=parse_role_groups, fmt=format_role_groups)
+        await self._render_list_step(interaction, session, embed, modal, "Enter roles",
+                                     attr="reaction_roles", step="reaction_roles",
+                                     fmt=format_role_groups)
 
     async def _render_list_step(self, interaction: discord.Interaction, session: WizardSession,
                                 embed: discord.Embed, modal_factory: Callable[[], discord.ui.Modal],
-                                label: str, *, attr: str, step: str) -> None:
+                                label: str, *, attr: str, step: str,
+                                fmt: Callable[[list], str] = _join) -> None:
         current = getattr(session.answers, attr)
         if current:
-            embed.add_field(name="Current", value=ui.clip(", ".join(current)), inline=False)
+            embed.add_field(name="Current", value=ui.clip(fmt(current)), inline=False)
         view = WizardView(self, session)
 
         async def open_modal(i: discord.Interaction) -> None:
@@ -503,8 +528,9 @@ class Wizard(commands.Cog):
                 f"Your server currently has **{len(guild.channels)}** channels and categories.\n\n"
                 "🧹 **Fresh start**: delete **every** existing channel and category "
                 + (f"(plus the {tracked_roles} role(s) I made in earlier setups) " if tracked_roles else "")
-                + "and build everything new. Other roles are kept. "
-                "**Deleted channels and their messages can't be recovered.**\n\n"
+                + "and build everything new. Other roles are kept. A backup of the current "
+                "channel layout is saved first, so `/restore` can bring the channels back, but "
+                "**their messages can't be recovered.**\n\n"
                 "➕ **Keep existing**: leave current channels alone and add the new ones."),
             colour=ui.BLURPLE)
         view = WizardView(self, session)
@@ -585,7 +611,8 @@ class Wizard(commands.Cog):
         role_lines = []
         for r in plan.roles:
             note = {"staff": "staff", "member": "members", "muted": "can't send or speak anywhere"
-                    }.get(r.key, "self-assign" if r.self_assign else "")
+                    }.get(r.key, f"reaction role: {r.group}" if r.reaction else
+                          f"level {r.level} reward" if r.level else "")
             role_lines.append(f"{mark(r)} @{r.name}" + (f" · {note}" if note else ""))
         embed.add_field(name=f"Roles ({len(plan.roles)})", value=ui.bullet_list(role_lines),
                         inline=False)
@@ -611,8 +638,22 @@ class Wizard(commands.Cog):
         if muted and not plan.reuses(muted) and not plan.wipe:
             notes.append(f"🔇 **@{muted.name}** will also be applied to your "
                          f"{len(guild.channels)} existing channel(s).")
-        if any(r.self_assign for r in plan.roles):
-            notes.append("🏷️ A self-assign menu (buttons + emoji reactions) will be posted.")
+        if plan.reaction_groups:
+            notes.append(f"✨ {len(plan.reaction_groups)} reaction-role message(s) will be posted "
+                         "in their own channel.")
+        member = plan.role("member")
+        if "verification" in plan.features and member:
+            notes.append("✅ **Verification:** most channels are hidden until members click Verify "
+                         f"and get **@{member.name}**. Existing members need to verify too "
+                         "(staff and admins can always see everything).")
+        elif member:
+            notes.append(f"👋 New members get **@{member.name}** automatically.")
+        if "leveling" in plan.features:
+            notes.append("⭐ Members earn XP for chatting; `/rank` and `/leaderboard` show progress.")
+        if "server_stats" in plan.features:
+            notes.append("📊 Stat channels update every 10 minutes.")
+        if plan.wipe:
+            notes.append("💾 The current layout is backed up before anything is deleted.")
         if notes:
             embed.add_field(name="Also", value=ui.clip("\n".join(notes)), inline=False)
         return ui.fit_embed(embed)
@@ -686,6 +727,11 @@ class Wizard(commands.Cog):
                     colour=ui.RED))
                 return
             embed = result_embed(result)
+            if (stats := self.bot.get_cog("Stats")) is not None:
+                # In the background: renames can be rate limited for minutes.
+                task = asyncio.create_task(stats.refresh(guild))
+                self._tasks.add(task)
+                task.add_done_callback(self._tasks.discard)
             # After a fresh start the wizard's channel is gone, so post the summary
             # in the new staff channel (or the first new channel) instead.
             if not await reporter.finish(embed) and result.home_channel:
@@ -715,6 +761,11 @@ def result_embed(result: BuildResult) -> discord.Embed:
                         inline=False)
     if result.errors:
         embed.add_field(name="❌ Errors", value=ui.bullet_list([f"• {e}" for e in result.errors]),
+                        inline=False)
+    if result.backup_id:
+        embed.add_field(name="💾 Backup", value=f"Your old layout was saved as backup "
+                                                f"**#{result.backup_id}**. `/restore` brings the "
+                                                "channels back (without their messages).",
                         inline=False)
     embed.set_footer(text="Run /reset to remove everything this bot created.")
     return ui.fit_embed(embed)

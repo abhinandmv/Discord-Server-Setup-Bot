@@ -12,7 +12,17 @@ import templates
 
 MAX_EXTRA_CHANNELS = 10
 MAX_SUBJECTS = 20
-MAX_SELF_ROLES = 20  # one message holds at most 25 buttons / 20 reactions
+MAX_SELF_ROLES = 20  # reaction roles per setup (a message holds at most 20 reactions)
+MAX_ROLE_GROUPS = 5  # one reaction-roles message per group
+DEFAULT_ROLE_GROUP = "Roles"
+
+
+@dataclass
+class RoleGroup:
+    """One reaction-roles message."""
+    name: str
+    roles: list[str] = field(default_factory=list)
+    exclusive: bool = False  # members may pick only one role from this group
 
 
 @dataclass
@@ -24,7 +34,7 @@ class WizardAnswers:
     extra_channels: list[str] = field(default_factory=list)
     ticket_role: str | None = None  # "plan:<role key>" or "id:<existing role id>"
     subjects: list[str] = field(default_factory=list)
-    self_roles: list[str] = field(default_factory=list)
+    reaction_roles: list[RoleGroup] = field(default_factory=list)
 
 
 @dataclass
@@ -36,6 +46,9 @@ class RoleSpec:
     mentionable: bool = False
     permissions: tuple[str, ...] = ()
     self_assign: bool = False
+    group: str | None = None  # reaction-role message (group) this role belongs to
+    reaction: bool = False  # self-assigned by reacting in the reaction-roles channel
+    level: int | None = None  # leveling reward
     existing_id: int | None = None  # set by find_conflicts()
 
 
@@ -46,6 +59,7 @@ class ChannelSpec:
     preset: str | None = None  # None = inherit from category
     topic: str | None = None
     special: str | None = None
+    gated: bool = False  # hidden until verified
     existing_id: int | None = None
 
     @property
@@ -61,6 +75,11 @@ class CategorySpec:
     channels: list[ChannelSpec] = field(default_factory=list)
     existing_id: int | None = None
 
+    @property
+    def gated(self) -> bool:
+        # A category stays visible if anything in it is, e.g. rules next to announcements.
+        return bool(self.channels) and all(ch.gated for ch in self.channels)
+
 
 @dataclass
 class Plan:
@@ -72,6 +91,7 @@ class Plan:
     ticket_category_name: str = ""
     create_duplicates: bool = False
     wipe: bool = False  # delete every existing channel/category first
+    reaction_groups: list[RoleGroup] = field(default_factory=list)  # one message each
 
     def role(self, key: str) -> RoleSpec | None:
         return next((r for r in self.roles if r.key == key), None)
@@ -112,6 +132,49 @@ def parse_list(raw: str) -> list[str]:
 
 
 _ASCII_PUNCT = re.compile("[" + re.escape(string.punctuation.replace("-", "").replace("_", "")) + "]")
+
+
+_PICK_ONE = re.compile(r"\s*\(\s*pick\s+one\s*\)\s*$", re.IGNORECASE)
+
+
+def parse_role_groups(raw: str) -> list[RoleGroup]:
+    """Parse the reaction roles box.
+
+    One group per line, "Group name: role, role". Add "(pick one)" after the
+    group name to allow only one role from it. Lines without a group name go
+    into DEFAULT_ROLE_GROUP, so a plain "PC, Console" list still works.
+    Role names are deduplicated across groups and capped at MAX_SELF_ROLES.
+    """
+    groups: dict[str, RoleGroup] = {}
+    seen: set[str] = set()
+    total = 0
+    for line in (raw or "").splitlines():
+        head, sep, rest = line.partition(":")
+        if not sep or "," in head or not head.strip():
+            head, rest = DEFAULT_ROLE_GROUP, line
+        exclusive = bool(_PICK_ONE.search(head))
+        name = _PICK_ONE.sub("", head).strip()[:80] or DEFAULT_ROLE_GROUP
+        key = name.lower()
+        if key not in groups:
+            if len(groups) >= MAX_ROLE_GROUPS:
+                key = next(reversed(groups))  # overflow joins the last group
+            else:
+                groups[key] = RoleGroup(name, exclusive=exclusive)
+        group = groups[key]
+        group.exclusive = group.exclusive or exclusive
+        for role in parse_list(rest):
+            if role.lower() in seen or total >= MAX_SELF_ROLES:
+                continue
+            seen.add(role.lower())
+            group.roles.append(role)
+            total += 1
+    return [g for g in groups.values() if g.roles]
+
+
+def format_role_groups(groups: list[RoleGroup]) -> str:
+    """Inverse of parse_role_groups, used to pre-fill the wizard's text box."""
+    return "\n".join(f"{g.name}{' (pick one)' if g.exclusive else ''}: {', '.join(g.roles)}"
+                     for g in groups)
 
 
 def text_channel_name(raw: str) -> str:
@@ -197,11 +260,27 @@ def build_plan(a: WizardAnswers) -> Plan:
     add_role("staff", a.staff_role or t["staff_role"], staff_style)
     add_role("member", a.member_role or t["member_role"], member_style)
     add_role("muted", defaults["muted"]["name"], defaults["muted"])
+    leveling = "leveling" in a.features
     for extra in extras:
         add_role(f"extra:{extra['name'].lower()}", extra["name"], extra)
-    if "self_roles" in steps:
-        for name in a.self_roles[:MAX_SELF_ROLES]:
-            add_role(f"self:{name.lower()}", name, defaults.get("self_assign", {}), self_assign=True)
+        if leveling and extra.get("level") and plan.roles[-1].key == f"extra:{extra['name'].lower()}":
+            plan.roles[-1].level = extra["level"]
+    if "reaction_roles" in steps:
+        for group in a.reaction_roles:
+            kept = RoleGroup(group.name, exclusive=group.exclusive)
+            for name in group.roles:
+                style = dict(defaults.get("self_assign", {}))
+                emoji, _ = split_leading_emoji(name)
+                if "colo" in group.name.lower() and emoji in templates.EMOJI_COLORS:
+                    style["color"] = templates.EMOJI_COLORS[emoji]
+                before = len(plan.roles)
+                add_role(f"react:{name.lower()}", name, style, self_assign=True)
+                if len(plan.roles) > before:  # skipped if the name is already taken
+                    plan.roles[-1].group = group.name
+                    plan.roles[-1].reaction = True
+                    kept.roles.append(plan.roles[-1].name)
+            if kept.roles:
+                plan.reaction_groups.append(kept)
 
     above = {f"extra:{e['name'].lower()}" for e in extras if e.get("above_staff")}
 
@@ -211,7 +290,7 @@ def build_plan(a: WizardAnswers) -> Plan:
         return {"staff": 1, "muted": 2}.get(r.key, 4 if r.key == "member" else 5 if r.self_assign else 3)
 
     plan.roles.sort(key=rank)  # stable: keeps template order within each rank
-    has_self_roles = any(r.self_assign for r in plan.roles)
+    has_reaction_roles = any(r.reaction for r in plan.roles)
 
     # Channels, gathered from every source, then grouped by category.
     renames = t.get("renames", {})
@@ -230,10 +309,11 @@ def build_plan(a: WizardAnswers) -> Plan:
                                        emoji=emoji or templates.DEFAULT_SUBJECT_EMOJI,
                                        topic=f"Discussion and help for {rest}."))
 
+    gate = "verification" in a.features
     by_category: dict[str, list[ChannelSpec]] = {key: [] for key in templates.CATEGORIES}
     seen_channels: set[tuple[str, str]] = set()
     for d in defs:
-        if d.get("special") == "role_menu" and not has_self_roles:
+        if d.get("special") == "reaction_menu" and not has_reaction_roles:
             continue
         name = styled_channel_name(d, renames)
         ident = (d["type"], name.lower())
@@ -243,6 +323,7 @@ def build_plan(a: WizardAnswers) -> Plan:
         by_category[d["category"]].append(ChannelSpec(
             name=name, kind=d["type"], preset=d.get("preset"),
             topic=d.get("topic"), special=d.get("special"),
+            gated=gate and not d.get("ungated"),
         ))
 
     for key, cat in templates.CATEGORIES.items():

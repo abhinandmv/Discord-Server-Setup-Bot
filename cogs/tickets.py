@@ -18,6 +18,7 @@ from discord.ext import commands
 
 import templates
 from core import ui
+from core.modlog import log_event
 from core.permissions import PermissionContext, overwrites_for
 from core.plan import text_channel_name
 from core.retry import call_with_retry, describe_error
@@ -170,6 +171,7 @@ class Tickets(commands.Cog):
             view=view,
             allowed_mentions=discord.AllowedMentions(users=True, roles=True))
         await interaction.followup.send(f"Ticket created: {channel.mention}", ephemeral=True)
+        await log_event(self.bot, guild, "🎫 Ticket opened", f"{channel.mention} by {user.mention} ({user})")
 
     async def close_ticket(self, interaction: discord.Interaction) -> None:
         channel, member = interaction.channel, interaction.user
@@ -198,6 +200,9 @@ class Tickets(commands.Cog):
                 await interaction.followup.send(f"Couldn't delete the channel: {describe_error(exc)}")
                 return
             storage.untrack(guild.id, channel.id)
+            await log_event(self.bot, guild, "🔒 Ticket closed",
+                            f"#{channel.name} (opened by <@{owner_id}>)\nClosed by {member.mention}",
+                            colour=ui.YELLOW)
 
             # Last ticket closed -> remove the category so it disappears for everyone.
             if (category is not None

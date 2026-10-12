@@ -1,0 +1,278 @@
+"""Moderation: /mute, /unmute, /warn, /warnings, /clearwarnings and /purge.
+
+Muting uses the Muted role /setup created (it can't type, react or speak
+anywhere). Timed mutes are stored in the database, so they still end on time
+after a restart, and leaving and rejoining doesn't shake a mute off.
+Every action is posted to the mod-log channel.
+"""
+
+from __future__ import annotations
+
+import logging
+import math
+import re
+import time
+
+import discord
+from discord import app_commands
+from discord.ext import commands, tasks
+
+from core import ui
+from core.modlog import log_event
+from core.permissions import is_access_role, is_safe_self_assign_role
+
+log = logging.getLogger(__name__)
+
+_DURATION = re.compile(r"^\s*(\d+)\s*(s|sec|m|min|h|hr|hour|d|day|w|week)s?\s*$", re.IGNORECASE)
+_UNIT_SECONDS = {"s": 1, "sec": 1, "m": 60, "min": 60, "h": 3600, "hr": 3600, "hour": 3600,
+                 "d": 86400, "day": 86400, "w": 604800, "week": 604800}
+MAX_MUTE_SECONDS = 28 * 86400
+
+
+def parse_duration(text: str) -> int | None:
+    """'10m' -> 600, '2 hours' -> 7200; None if it can't be parsed."""
+    match = _DURATION.match(text or "")
+    if not match:
+        return None
+    return int(match[1]) * _UNIT_SECONDS[match[2].lower()]
+
+
+def human_duration(seconds: int) -> str:
+    for unit, size in (("week", 604800), ("day", 86400), ("hour", 3600), ("minute", 60)):
+        if seconds >= size and seconds % size == 0:
+            n = seconds // size
+            return f"{n} {unit}{'s' if n != 1 else ''}"
+    return f"{seconds} seconds"
+
+
+def target_problem(actor: discord.Member, target: discord.Member) -> str | None:
+    """Why ``actor`` may not moderate ``target``, or None if they may."""
+    guild = actor.guild
+    if target.id == actor.id:
+        return "You can't do that to yourself."
+    if target.bot:
+        return "That's a bot."
+    if target.id == guild.owner_id:
+        return "You can't moderate the server owner."
+    if actor.id != guild.owner_id and target.top_role >= actor.top_role:
+        return "They have a role equal to or higher than yours."
+    return None
+
+
+class Moderation(commands.Cog):
+    def __init__(self, bot: commands.Bot) -> None:
+        self.bot = bot
+
+    async def cog_load(self) -> None:
+        self.expire_mutes.start()
+
+    async def cog_unload(self) -> None:
+        self.expire_mutes.cancel()
+
+    def _muted_role(self, guild: discord.Guild) -> tuple[discord.Role | None, str | None]:
+        raw = self.bot.storage.get_setting(guild.id, "muted_role_id")
+        role = guild.get_role(int(raw)) if raw and raw.isdigit() else None
+        if role is None:
+            return None, "There's no Muted role yet. Run `/setup` first."
+        # Moderators hand this role out through the bot, so it must stay harmless.
+        if not is_safe_self_assign_role(role) or is_access_role(role):
+            return None, (f"{role.mention} has been given extra permissions or channel access, so "
+                          "I won't hand it out. Remove those and try again.")
+        if role >= guild.me.top_role:
+            return None, f"Move my role above {role.mention} so I can assign it."
+        return role, None
+
+    # ------------------------------------------------------------------ #
+    @app_commands.command(name="mute", description="Stop a member from typing, reacting and speaking")
+    @app_commands.guild_only()
+    @app_commands.default_permissions(moderate_members=True)
+    @app_commands.checks.has_permissions(moderate_members=True)
+    @app_commands.describe(member="Who to mute", duration="e.g. 10m, 2h, 1d (empty = until /unmute)",
+                           reason="Shown in the mod log")
+    async def mute(self, interaction: discord.Interaction, member: discord.Member,
+                   duration: str | None = None, reason: str | None = None) -> None:
+        guild = interaction.guild
+        problem = target_problem(interaction.user, member)
+        role, role_problem = self._muted_role(guild)
+        seconds = parse_duration(duration) if duration else None
+        if duration and (seconds is None or not 0 < seconds <= MAX_MUTE_SECONDS):
+            problem = problem or "Use a duration like `10m`, `2h` or `3d` (up to 28 days)."
+        if problem or role_problem:
+            await interaction.response.send_message(problem or role_problem, ephemeral=True)
+            return
+
+        try:
+            await member.add_roles(role, reason=f"Muted by {interaction.user}: {reason or 'no reason'}")
+        except discord.HTTPException as exc:
+            await interaction.response.send_message(f"Couldn't mute them: {exc.text or exc}",
+                                                    ephemeral=True)
+            return
+        # Indefinite mutes are stored too (never due), so rejoining can't escape them.
+        self.bot.storage.set_mute(guild.id, member.id,
+                                  time.time() + seconds if seconds else math.inf)
+
+        length = f" for {human_duration(seconds)}" if seconds else ""
+        note = ("\n-# They have Administrator, so channel permissions don't apply to them."
+                if member.guild_permissions.administrator else "")
+        await interaction.response.send_message(f"🔇 Muted {member.mention}{length}.{note}",
+                                                allowed_mentions=discord.AllowedMentions.none())
+        await log_event(self.bot, guild, "🔇 Member muted",
+                        f"{member.mention} ({member}){length}\nBy {interaction.user.mention}\n"
+                        f"Reason: {reason or '—'}", colour=ui.YELLOW)
+
+    @app_commands.command(name="unmute", description="Remove a member's mute")
+    @app_commands.guild_only()
+    @app_commands.default_permissions(moderate_members=True)
+    @app_commands.checks.has_permissions(moderate_members=True)
+    async def unmute(self, interaction: discord.Interaction, member: discord.Member) -> None:
+        guild = interaction.guild
+        problem = target_problem(interaction.user, member)
+        role, role_problem = self._muted_role(guild)
+        if problem or role_problem:
+            await interaction.response.send_message(problem or role_problem, ephemeral=True)
+            return
+        self.bot.storage.clear_mute(guild.id, member.id)
+        if role not in member.roles:
+            await interaction.response.send_message("They aren't muted.", ephemeral=True)
+            return
+        try:
+            await member.remove_roles(role, reason=f"Unmuted by {interaction.user}")
+        except discord.HTTPException as exc:
+            await interaction.response.send_message(f"Couldn't unmute them: {exc.text or exc}",
+                                                    ephemeral=True)
+            return
+        await interaction.response.send_message(f"🔊 Unmuted {member.mention}.",
+                                                allowed_mentions=discord.AllowedMentions.none())
+        await log_event(self.bot, guild, "🔊 Member unmuted",
+                        f"{member.mention} ({member})\nBy {interaction.user.mention}",
+                        colour=ui.GREEN)
+
+    @tasks.loop(seconds=30)
+    async def expire_mutes(self) -> None:
+        storage = self.bot.storage
+        for guild_id, user_id in storage.due_mutes(time.time()):
+            guild = self.bot.get_guild(guild_id)
+            if guild is None:
+                continue  # bot not in that server (anymore); try again later
+            storage.clear_mute(guild_id, user_id)
+            member = guild.get_member(user_id)
+            role, _ = self._muted_role(guild)
+            if member is None or role is None or role not in member.roles:
+                continue
+            try:
+                await member.remove_roles(role, reason="Timed mute ended")
+            except discord.HTTPException as exc:
+                log.warning("Couldn't end mute in %s: %s", guild_id, exc)
+                continue
+            await log_event(self.bot, guild, "🔊 Mute expired", f"{member.mention} ({member})",
+                            colour=ui.GREEN)
+
+    @expire_mutes.before_loop
+    async def _wait_ready(self) -> None:
+        await self.bot.wait_until_ready()
+
+    @commands.Cog.listener()
+    async def on_member_join(self, member: discord.Member) -> None:
+        """Leaving and rejoining doesn't remove an active mute."""
+        if not self.bot.storage.is_muted(member.guild.id, member.id, time.time()):
+            return
+        role, _ = self._muted_role(member.guild)
+        if role is not None:
+            try:
+                await member.add_roles(role, reason="Rejoined while muted")
+            except discord.HTTPException:
+                pass
+
+    # ------------------------------------------------------------------ #
+    @app_commands.command(name="warn", description="Give a member a formal warning")
+    @app_commands.guild_only()
+    @app_commands.default_permissions(moderate_members=True)
+    @app_commands.checks.has_permissions(moderate_members=True)
+    async def warn(self, interaction: discord.Interaction, member: discord.Member,
+                   reason: app_commands.Range[str, 1, 500]) -> None:
+        guild = interaction.guild
+        problem = target_problem(interaction.user, member)
+        if problem:
+            await interaction.response.send_message(problem, ephemeral=True)
+            return
+        storage = self.bot.storage
+        storage.add_warning(guild.id, member.id, interaction.user.id, reason)
+        count = len(storage.warnings(guild.id, member.id))
+        try:
+            await member.send(embed=discord.Embed(
+                title=f"⚠️ You were warned in {guild.name}", description=f"Reason: {reason}",
+                colour=ui.YELLOW))
+            dm = ""
+        except discord.HTTPException:
+            dm = " (I couldn't DM them)"
+        await interaction.response.send_message(
+            f"⚠️ Warned {member.mention}. They now have **{count}** warning(s).{dm}",
+            allowed_mentions=discord.AllowedMentions.none())
+        await log_event(self.bot, guild, "⚠️ Member warned",
+                        f"{member.mention} ({member}) · warning #{count}\n"
+                        f"By {interaction.user.mention}\nReason: {reason}", colour=ui.YELLOW)
+
+    @app_commands.command(name="warnings", description="List a member's warnings")
+    @app_commands.guild_only()
+    @app_commands.default_permissions(moderate_members=True)
+    @app_commands.checks.has_permissions(moderate_members=True)
+    async def warnings(self, interaction: discord.Interaction, member: discord.Member) -> None:
+        rows = self.bot.storage.warnings(interaction.guild.id, member.id)
+        lines = [f"**#{len(rows) - i}** · {row['created_at'][:10]} · by <@{row['moderator_id']}>\n"
+                 f"{ui.clip(row['reason'], 200)}" for i, row in enumerate(rows)]
+        embed = discord.Embed(title=f"⚠️ Warnings for {member.display_name} ({len(rows)})",
+                              description=ui.bullet_list(lines, 4000) if lines else "No warnings. 🎉",
+                              colour=ui.YELLOW if rows else ui.GREEN)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="clearwarnings", description="Delete all of a member's warnings")
+    @app_commands.guild_only()
+    @app_commands.default_permissions(moderate_members=True)
+    @app_commands.checks.has_permissions(moderate_members=True)
+    async def clearwarnings(self, interaction: discord.Interaction, member: discord.Member) -> None:
+        problem = target_problem(interaction.user, member)
+        if problem:
+            await interaction.response.send_message(problem, ephemeral=True)
+            return
+        n = self.bot.storage.clear_warnings(interaction.guild.id, member.id)
+        await interaction.response.send_message(f"Cleared {n} warning(s) for {member.mention}.",
+                                                ephemeral=True)
+        if n:
+            await log_event(self.bot, interaction.guild, "🧽 Warnings cleared",
+                            f"{member.mention} ({member}) · {n} warning(s)\n"
+                            f"By {interaction.user.mention}")
+
+    # ------------------------------------------------------------------ #
+    @app_commands.command(name="purge", description="Bulk-delete recent messages in this channel")
+    @app_commands.guild_only()
+    @app_commands.default_permissions(manage_messages=True)
+    @app_commands.checks.has_permissions(manage_messages=True)
+    @app_commands.describe(amount="How many recent messages to check (1-100)",
+                           member="Only delete messages from this member")
+    async def purge(self, interaction: discord.Interaction, amount: app_commands.Range[int, 1, 100],
+                    member: discord.Member | None = None) -> None:
+        channel = interaction.channel
+        if not isinstance(channel, (discord.TextChannel, discord.VoiceChannel, discord.Thread)):
+            await interaction.response.send_message("I can't purge here.", ephemeral=True)
+            return
+        if not channel.permissions_for(interaction.guild.me).manage_messages:
+            await interaction.response.send_message("I need Manage Messages in this channel.",
+                                                    ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            deleted = await channel.purge(
+                limit=amount, check=(lambda m: m.author.id == member.id) if member else (lambda m: True),
+                reason=f"/purge by {interaction.user}")
+        except discord.HTTPException as exc:
+            await interaction.followup.send(f"Couldn't purge: {exc.text or exc}", ephemeral=True)
+            return
+        who = f" from {member.mention}" if member else ""
+        await interaction.followup.send(f"🧹 Deleted {len(deleted)} message(s){who}.", ephemeral=True)
+        await log_event(self.bot, interaction.guild, "🧹 Messages purged",
+                        f"{len(deleted)} message(s){who} in {channel.mention}\n"
+                        f"By {interaction.user.mention}")
+
+
+async def setup(bot: commands.Bot) -> None:
+    await bot.add_cog(Moderation(bot))

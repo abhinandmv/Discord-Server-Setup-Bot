@@ -32,7 +32,12 @@ PRESET_LABELS: dict[str, str] = {
     "readonly": "read-only",
     "staff_only": "staff only",
     "tickets": "private: ticket role + creator",
+    "locked": "display only",
 }
+
+# Presets that the verification gate hides from unverified members. The other
+# presets are already hidden from @everyone.
+GATEABLE_PRESETS = {"public", "announcement", "readonly", "locked"}
 
 
 def missing_bot_permissions(perms: discord.Permissions) -> list[str]:
@@ -56,8 +61,11 @@ def muted_overwrite() -> discord.PermissionOverwrite:
 def _bot_overwrite() -> discord.PermissionOverwrite:
     # Without this the bot couldn't see hidden channels or post its menus in
     # read-only ones (an @everyone deny beats the bot role's server-level allow).
+    # Connect matters for voice channels: Discord won't let a bot edit (e.g.
+    # rename a live stat channel) a voice channel it isn't allowed to join.
     return discord.PermissionOverwrite(view_channel=True, send_messages=True, embed_links=True,
-                                       read_message_history=True, manage_channels=True)
+                                       read_message_history=True, manage_channels=True,
+                                       connect=True)
 
 
 @dataclass
@@ -66,12 +74,13 @@ class PermissionContext:
     staff: discord.Role | None
     muted: discord.Role | None
     ticket_role: discord.Role | None
+    gate: discord.Role | None = None  # verification: the role that unlocks gated channels
 
 
 Overwrites = dict[discord.Role | discord.Member, discord.PermissionOverwrite]
 
 
-def overwrites_for(preset: str, ctx: PermissionContext) -> Overwrites:
+def overwrites_for(preset: str, ctx: PermissionContext, *, gated: bool = False) -> Overwrites:
     everyone = ctx.guild.default_role
     ow: Overwrites = {}
 
@@ -101,8 +110,21 @@ def overwrites_for(preset: str, ctx: PermissionContext) -> Overwrites:
             ow[ctx.ticket_role] = discord.PermissionOverwrite(
                 view_channel=True, send_messages=True, read_message_history=True)
         ow[ctx.guild.me] = _bot_overwrite()
+    elif preset == "locked":
+        ow[everyone] = discord.PermissionOverwrite(connect=False)
+        ow[ctx.guild.me] = _bot_overwrite()
     else:
         raise ValueError(f"Unknown permission preset {preset!r}")
+
+    if gated and ctx.gate is not None and preset in GATEABLE_PRESETS:
+        # Only view_channel is allowed for the gate role, never send_messages,
+        # so the Muted role's send deny still wins (see muted_overwrite).
+        for target, view in ((everyone, False), (ctx.gate, True), (ctx.staff, True)):
+            if target is not None:
+                current = ow.get(target) or discord.PermissionOverwrite()
+                current.view_channel = view
+                ow[target] = current
+        ow[ctx.guild.me] = _bot_overwrite()
 
     # Added last so that it doesn't replace another overwrite if Muted somehow equals another key.
     if ctx.muted and ctx.muted not in ow:
@@ -127,3 +149,21 @@ def can_hand_out(actor: discord.Member, role: discord.Role) -> bool:
     if actor.guild.owner_id == actor.id:
         return True
     return actor.guild_permissions.manage_roles and role < actor.top_role
+
+
+def grantable_by(actor: discord.Member | None, wanted: discord.Permissions) -> discord.Permissions:
+    """Permissions ``actor`` may put on a new role: Discord itself only lets you
+    grant permissions you hold, and the bot must not be a way around that."""
+    if actor is None:
+        return discord.Permissions.none()
+    if actor.guild.owner_id == actor.id or actor.guild_permissions.administrator:
+        return wanted
+    return discord.Permissions(wanted.value & actor.guild_permissions.value)
+
+
+def is_access_role(role: discord.Role) -> bool:
+    """True if any channel overwrite *allows* something for this role, i.e. the
+    role unlocks channels (staff, ticket, "Verified"-style roles)."""
+    return any(allow.value for ch in role.guild.channels
+               if (ow := ch.overwrites.get(role)) is not None
+               for allow, _deny in [ow.pair()])

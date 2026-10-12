@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections import Counter
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable
@@ -10,11 +11,13 @@ from typing import Awaitable, Callable
 import discord
 
 import templates
-from core.permissions import (PermissionContext, can_hand_out, is_safe_self_assign_role,
-                              muted_overwrite, overwrites_for)
+from core.layout import snapshot
+from core.permissions import (PermissionContext, can_hand_out, grantable_by, is_access_role,
+                              is_safe_self_assign_role, muted_overwrite, overwrites_for)
 from core.plan import Plan, RoleSpec, split_leading_emoji
 from core.retry import call_with_retry, describe_error
 from core.storage import Storage
+from core.wipe import wipe, wipe_targets
 
 log = logging.getLogger(__name__)
 
@@ -32,6 +35,7 @@ class BuildResult:
     warnings: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     home_channel: discord.TextChannel | None = None  # where to post the summary after a wipe
+    backup_id: int | None = None  # layout saved before a fresh start (for /restore)
 
 
 def normalize_emoji(emoji: str) -> str:
@@ -52,21 +56,34 @@ class Builder:
         self.result = BuildResult()
         self.roles: dict[str, discord.Role] = {}
         self.categories: dict[str, discord.CategoryChannel] = {}
-        self.specials: dict[str, discord.TextChannel] = {}
+        self.specials: dict[str, discord.abc.GuildChannel] = {}
         self.ctx: PermissionContext | None = None
+        self._created_keys: set[str] = set()  # plan role keys created (not reused) this run
+        self._new_channels: set[int] = set()  # channels created (not reused) this run
         self._deleted_ids: set[int] = set()
         self._done = 0
         self._total = 0
 
     # ------------------------------------------------------------------ #
     async def run(self) -> BuildResult:
-        wipe_channels, wipe_roles = self._wipe_targets() if self.plan.wipe else ([], [])
-        posts = int(any(r.self_assign for r in self.plan.roles)) + int(self.plan.ticket_role is not None)
+        wipe_channels, wipe_roles = (wipe_targets(self.guild, self.storage, self.actor)
+                                     if self.plan.wipe else ([], []))
+        posts = (int(bool(self.plan.reaction_groups))
+                 + int(self.plan.ticket_role is not None) + int("verification" in self.plan.features)
+                 + int("rules_welcome" in self.plan.features))  # upper bound; rules may be skipped
         creates = len(self.plan.roles) + len(self.plan.categories) + len(self.plan.channels()) + posts
         self._total = len(wipe_channels) + len(wipe_roles) + creates
 
         if self.plan.wipe:
-            await self._wipe(wipe_channels, wipe_roles)
+            self.result.backup_id = self.storage.add_backup(
+                self.guild.id, "Before fresh start", snapshot(self.guild))
+            wiped = await wipe(self.guild, self.storage, wipe_channels, wipe_roles,
+                               reason=f"{REASON} (fresh start)", delay=self.delay,
+                               tick=self._tick)
+            self.result.deleted = wiped.deleted
+            self._deleted_ids = wiped.deleted_ids
+            if wiped.failed:
+                self.result.warnings.append("Couldn't delete: " + ", ".join(wiped.failed))
 
         muted = self.plan.role("muted")
         # Snapshot before we create anything: these are the channels a human made
@@ -81,6 +98,7 @@ class Builder:
             staff=self.roles.get("staff"),
             muted=self.roles.get("muted"),
             ticket_role=self._resolve_ticket_role(),
+            gate=self._resolve_gate(),
         )
         await self._create_categories()
         await self._create_channels()
@@ -103,58 +121,6 @@ class Builder:
         return self.plan.reuses(spec) and spec.existing_id not in self._deleted_ids
 
     # ------------------------------------------------------------------ #
-    # Fresh start
-    # ------------------------------------------------------------------ #
-    def _wipe_targets(self) -> tuple[list[discord.abc.GuildChannel], list[discord.Role]]:
-        # Children before categories, so each category is empty when deleted.
-        channels = sorted(self.guild.channels, key=lambda c: isinstance(c, discord.CategoryChannel))
-        # Only roles this bot made earlier. Other roles hold members' assignments
-        # and permissions, so a fresh start leaves them alone.
-        roles = []
-        for item in self.storage.items(self.guild.id):
-            role = self.guild.get_role(item.item_id) if item.kind == "role" else None
-            if role is not None and role < self.guild.me.top_role:
-                roles.append(role)
-        return channels, roles
-
-    async def _wipe(self, channels: list[discord.abc.GuildChannel], roles: list[discord.Role]) -> None:
-        failed: list[str] = []
-        for i, channel in enumerate(channels, 1):
-            try:
-                await call_with_retry(lambda: channel.delete(reason=f"{REASON} (fresh start)"),
-                                      delay=self.delay)
-                self._forget(channel.id)
-                self.result.deleted["channel"] += 1
-            except discord.NotFound:
-                self._forget(channel.id)
-            except discord.HTTPException as exc:
-                # e.g. a Community server's required rules/updates channel.
-                failed.append(f"#{channel.name} ({describe_error(exc)})")
-            await self._tick("Deleting old channels", i, len(channels))
-
-        for i, role in enumerate(roles, 1):
-            try:
-                await call_with_retry(lambda: role.delete(reason=f"{REASON} (fresh start)"),
-                                      delay=self.delay)
-                self._forget(role.id)
-                self.result.deleted["role"] += 1
-            except discord.NotFound:
-                self._forget(role.id)
-            except discord.HTTPException as exc:
-                failed.append(f"@{role.name} ({describe_error(exc)})")
-            await self._tick("Deleting old bot roles", i, len(roles))
-
-        if failed:
-            self.result.warnings.append("Couldn't delete: " + ", ".join(failed))
-        # Menus and ticket channels from earlier runs are gone now.
-        for key in ("reaction_roles", "ticket_category_id"):
-            self.storage.delete_setting(self.guild.id, key)
-
-    def _forget(self, item_id: int) -> None:
-        self._deleted_ids.add(item_id)
-        self.storage.untrack(self.guild.id, item_id)
-
-    # ------------------------------------------------------------------ #
     # Roles
     # ------------------------------------------------------------------ #
     async def _create_roles(self) -> None:
@@ -173,8 +139,8 @@ class Builder:
             if spec.self_assign and not self._may_expose(role):
                 self.result.warnings.append(
                     f"@{role.name} already exists and isn't safe to make self-assignable (it has "
-                    "moderator permissions, or you couldn't assign it yourself), so it was left "
-                    "out of the self-assign menu.")
+                    "moderator permissions, unlocks channels, or you couldn't assign it "
+                    "yourself), so it was left out of the self-assign menu.")
                 return None
             self.result.reused.append(f"@{role.name}")
             return role
@@ -186,27 +152,64 @@ class Builder:
                 hoist=spec.hoist, mentionable=spec.mentionable, reason=REASON),
             delay=self.delay)
         self._track(role, "role", role.name)
+        self._created_keys.add(spec.key)
         return role
 
     def _may_expose(self, role: discord.Role) -> bool:
         """May this pre-existing role become self-assignable by every member?"""
-        if not is_safe_self_assign_role(role):
-            return False
-        made_by_bot = any(i.item_id == role.id for i in self.storage.items(self.guild.id))
-        return made_by_bot or (self.actor is not None and can_hand_out(self.actor, role))
+        # Applies to roles the bot made earlier too: an old staff role has no
+        # "elevated" permissions but unlocks the staff channels.
+        return (is_safe_self_assign_role(role)
+                and not is_access_role(role)
+                and self.actor is not None and can_hand_out(self.actor, role))
+
+    def _bot_can_give(self, key: str) -> discord.Role | None:
+        """The planned role ``key`` if the bot may hand it to members automatically
+        (verify button, auto-role on join, level rewards), else None.
+
+        Roles created this run are always fine. A reused role must pass the same
+        checks as a self-assign role, except that the member role is allowed to
+        unlock channels (that's its job with verification).
+        """
+        role = self.roles.get(key)
+        if role is None or role >= self.guild.me.top_role:
+            return None
+        if key in self._created_keys:
+            return role
+        if key == "member":
+            ok = (is_safe_self_assign_role(role) and self.actor is not None
+                  and can_hand_out(self.actor, role))
+        else:
+            ok = self._may_expose(role)
+        return role if ok else None
+
+    def _resolve_gate(self) -> discord.Role | None:
+        if "verification" not in self.plan.features:
+            return None
+        gate = self._bot_can_give("member")
+        if gate is None:
+            self.result.warnings.append(
+                "Verification was turned off: the member role already existed and isn't safe for "
+                "me to hand out (it has moderator permissions or is above your role), so channels "
+                "were left visible to everyone.")
+        return gate
 
     def _grantable(self, spec: RoleSpec) -> discord.Permissions:
-        """A bot can only grant permissions it has itself; drop the rest and warn."""
+        """Grant only permissions both the bot and the person running /setup hold.
+
+        Otherwise someone with Manage Roles could have the bot mint a role with
+        powers they lack and then assign it to themselves.
+        """
         wanted = discord.Permissions(**{p: True for p in spec.permissions})
-        have = self.guild.me.guild_permissions
-        if have.administrator:
-            return wanted
-        granted = discord.Permissions(wanted.value & have.value)
+        bot = self.guild.me.guild_permissions
+        granted = grantable_by(self.actor, wanted)
+        if not bot.administrator:
+            granted = discord.Permissions(granted.value & bot.value)
         dropped = [p for p in spec.permissions if not getattr(granted, p)]
         if dropped:
             self.result.warnings.append(
-                f"@{spec.name} was created without {', '.join(dropped)} because I don't have "
-                "those permissions myself. Add them manually if you want them.")
+                f"@{spec.name} was created without {', '.join(dropped)} because you or I don't "
+                "have those permissions. A server admin can add them manually.")
         return granted
 
     def _resolve_ticket_role(self) -> discord.Role | None:
@@ -239,7 +242,7 @@ class Builder:
                     self.categories[spec.key] = existing
                     self.result.reused.append(f"📁 {existing.name}")
                 else:
-                    overwrites = overwrites_for(spec.preset, self.ctx)
+                    overwrites = overwrites_for(spec.preset, self.ctx, gated=spec.gated)
                     category = await call_with_retry(
                         lambda: self.guild.create_category(spec.name, overwrites=overwrites,
                                                            reason=REASON),
@@ -263,12 +266,13 @@ class Builder:
                         f"{spec.display}: skipped because category {cat.name} wasn't created")
                 elif self._reusing(spec) and existing is not None:
                     self.result.reused.append(spec.display)
-                    if spec.special and isinstance(existing, discord.TextChannel):
+                    if spec.special:
                         self.specials[spec.special] = existing
                 else:
                     # Always pass explicit overwrites. If they match the category's,
                     # Discord shows the channel as synced anyway.
-                    overwrites = overwrites_for(spec.preset or cat.preset, self.ctx)
+                    overwrites = overwrites_for(spec.preset or cat.preset, self.ctx,
+                                                gated=spec.gated)
                     if spec.kind == "voice":
                         factory = lambda: self.guild.create_voice_channel(  # noqa: E731
                             spec.name, category=parent, overwrites=overwrites, reason=REASON)
@@ -279,6 +283,7 @@ class Builder:
                             **kwargs)
                     channel = await call_with_retry(factory, delay=self.delay)
                     self._track(channel, "channel", channel.name, parent.id)
+                    self._new_channels.add(channel.id)
                     if spec.special:
                         self.specials[spec.special] = channel
                     if spec.kind == "text":
@@ -323,16 +328,24 @@ class Builder:
     # ------------------------------------------------------------------ #
     async def _post_menus(self) -> None:
         # Imported here: the cogs import core, so importing them at module load would be circular.
-        from cogs.role_menu import build_role_menu
+        from cogs.role_menu import build_reaction_message
         from cogs.tickets import build_ticket_panel
+        from cogs.welcome import build_rules_embed, build_verify_panel
 
         posts: list[tuple[str, Callable[[], Awaitable[None]]]] = []
-        self_roles = [self.roles[r.key] for r in self.plan.roles
-                      if r.self_assign and r.key in self.roles]
-        if any(r.self_assign for r in self.plan.roles):
-            posts.append(("role menu", lambda: self._post_role_menu(self_roles, build_role_menu)))
+        # Rules go first so they sit at the top of the rules channel.
+        # Only into a new rules channel: a reused one already has whatever rules it needs.
+        rules_channel = self.specials.get("rules")
+        if (rules_channel is not None and rules_channel.id in self._new_channels
+                and build_rules_embed(self.plan.server_type)):
+            posts.append(("rules", lambda: self._post_panel(
+                "rules", lambda: build_rules_embed(self.plan.server_type))))
+        if self.plan.reaction_groups:
+            posts.append(("reaction roles", lambda: self._post_reaction_menus(build_reaction_message)))
         if self.plan.ticket_role is not None:
-            posts.append(("ticket panel", lambda: self._post_ticket_panel(build_ticket_panel)))
+            posts.append(("ticket panel", lambda: self._post_panel("ticket_panel", build_ticket_panel)))
+        if "verification" in self.plan.features:
+            posts.append(("verify panel", lambda: self._post_verify_panel(build_verify_panel)))
 
         for i, (what, post) in enumerate(posts, 1):
             try:
@@ -356,47 +369,111 @@ class Builder:
             pairs.append((role, emoji))
         return pairs
 
-    async def _post_role_menu(self, roles: list[discord.Role], build) -> None:
-        channel = self.specials.get("role_menu")
-        if channel is None or not roles:
-            self.result.warnings.append("Self-assign menu not posted (no roles channel or roles).")
+    def _menu_groups(self, groups: list):
+        """[(group name, pick-one?, [(role, emoji)])], in the order typed."""
+        specs = [r for r in self.plan.roles if r.reaction and r.key in self.roles]
+        out = []
+        for group in groups:
+            roles = [self.roles[r.key] for r in specs if r.group == group.name]
+            if roles:
+                # Emoji only need to be unique within one message.
+                out.append((group.name, group.exclusive, self._assign_emojis(roles)))
+        return out
+
+    def _remember_menu(self, groups) -> None:
+        """Let the role-menu cog hand these roles out, and enforce pick-one groups."""
+        gid = self.guild.id
+        exclusive = self.storage.get_json(gid, "exclusive_role_groups", None) or []
+        exclusive += [[role.id for role, _ in pairs] for _, excl, pairs in groups if excl]
+        self.storage.set_json(gid, "exclusive_role_groups", exclusive)
+        allowed = set(self.storage.get_json(gid, "self_roles", None) or [])
+        allowed.update(role.id for _, _, pairs in groups for role, _ in pairs)
+        self.storage.set_json(gid, "self_roles", sorted(allowed))
+
+    async def _post_reaction_menus(self, build) -> None:
+        """One message per group in the reaction-roles channel, each with its emoji added."""
+        channel = self.specials.get("reaction_menu")
+        groups = self._menu_groups(self.plan.reaction_groups)
+        if not isinstance(channel, discord.TextChannel) or not groups:
+            self.result.warnings.append("Reaction roles not posted (no channel or roles).")
             return
-        pairs = self._assign_emojis(roles)
-        embed, view = build(pairs)
-        message = await call_with_retry(lambda: channel.send(embed=embed, view=view),
-                                        delay=self.delay)
-        self._track(message, "message", "role menu", channel.id)
-
-        # Reaction roles on the same message: react to add, un-react to remove.
-        mapping: dict[str, int] = {}
-        for role, emoji in pairs:
-            try:
-                await call_with_retry(lambda: message.add_reaction(emoji), delay=0.35)
-                mapping[normalize_emoji(emoji)] = role.id
-            except discord.HTTPException as exc:
-                self.result.warnings.append(f"Couldn't add reaction {emoji} for @{role.name}: "
-                                            f"{describe_error(exc)} (its button still works)")
         all_maps = self.storage.get_json(self.guild.id, "reaction_roles", None) or {}
-        all_maps[str(message.id)] = mapping
-        self.storage.set_json(self.guild.id, "reaction_roles", all_maps)
+        for index, group in enumerate(groups):
+            message = await call_with_retry(
+                lambda: channel.send(embed=build(group, first=index == 0)), delay=self.delay)
+            self._track(message, "message", f"reaction roles: {group[0]}", channel.id)
+            mapping: dict[str, int] = {}
+            for role, emoji in group[2]:
+                try:
+                    await call_with_retry(lambda: message.add_reaction(emoji), delay=0.35)
+                    mapping[normalize_emoji(emoji)] = role.id
+                except discord.HTTPException as exc:
+                    self.result.warnings.append(
+                        f"Couldn't add reaction {emoji} for @{role.name}: {describe_error(exc)}")
+            all_maps[str(message.id)] = mapping
+            # Saved after every message, so a failure part-way still leaves working menus.
+            self.storage.set_json(self.guild.id, "reaction_roles", all_maps)
+        self._remember_menu(groups)
 
-        allowed = set(self.storage.get_json(self.guild.id, "self_roles", None) or [])
-        allowed.update(r.id for r in roles)
-        self.storage.set_json(self.guild.id, "self_roles", sorted(allowed))
-
-    async def _post_ticket_panel(self, build) -> None:
-        channel = self.specials.get("ticket_panel")
-        if channel is None:
-            self.result.warnings.append("Ticket panel not posted (ticket channel missing).")
+    async def _post_panel(self, special: str, build) -> None:
+        channel = self.specials.get(special)
+        if not isinstance(channel, discord.TextChannel):
+            self.result.warnings.append(f"The {special.replace('_', ' ')} wasn't posted "
+                                        "(its channel is missing).")
             return
         embed, view = build()
         message = await call_with_retry(lambda: channel.send(embed=embed, view=view),
                                         delay=self.delay)
-        self._track(message, "message", "ticket panel", channel.id)
+        self._track(message, "message", special.replace("_", " "), channel.id)
+
+    async def _post_verify_panel(self, build) -> None:
+        if self.ctx.gate is None:
+            return  # verification was turned off, see _resolve_gate
+        rules = self.specials.get("rules")
+        await self._post_panel("verify", lambda: build(self.ctx.gate, rules))
 
     def _save_settings(self) -> None:
-        """Settings the ticket and role-menu cogs read later."""
+        """Settings the other cogs (tickets, role menu, welcome, leveling, stats) read later."""
         gid = self.guild.id
+        store = self.storage
+        features = set(self.plan.features)
+        store.set_setting(gid, "server_type", self.plan.server_type)
+
+        # A fresh start defines the server from scratch; "keep existing" only adds.
+        def flag(key: str, on: bool) -> None:
+            if on:
+                store.set_setting(gid, key, "1")
+            elif self.plan.wipe:
+                store.delete_setting(gid, key)
+
+        member = self._bot_can_give("member")
+        if member is not None:
+            store.set_setting(gid, "member_role_id", str(member.id))
+        flag("verify_enabled", self.ctx.gate is not None)
+        flag("leveling_enabled", "leveling" in features)
+        if "leveling" in features:
+            rewards = {}
+            for spec in self.plan.roles:
+                if spec.level and (role := self._bot_can_give(spec.key)):
+                    rewards[str(spec.level)] = role.id
+                elif spec.level and spec.key in self.roles:
+                    self.result.warnings.append(
+                        f"@{spec.name} already existed and isn't safe to give out automatically, "
+                        "so it isn't a level reward.")
+            store.set_json(gid, "level_roles", rewards)
+
+        for special, key in (("welcome", "welcome_channel_id"), ("mod_log", "mod_log_channel_id"),
+                             ("level_up", "level_channel_id"), ("verify", "verify_channel_id")):
+            if (channel := self.specials.get(special)) is not None:
+                store.set_setting(gid, key, str(channel.id))
+        # The label is the name without a count, in case an old stat channel was reused.
+        stats = {str(ch.id): {"kind": special[len("stat_"):],
+                              "label": re.sub(r":\s*[\d,]+$", "", ch.name)}
+                 for special, ch in self.specials.items() if special.startswith("stat_")}
+        if stats:
+            current = store.get_json(gid, "stat_channels", None) or {}
+            store.set_json(gid, "stat_channels", {**current, **stats})
+
         for key, role in (("staff_role_id", self.ctx.staff), ("muted_role_id", self.ctx.muted)):
             if role:
                 self.storage.set_setting(gid, key, str(role.id))

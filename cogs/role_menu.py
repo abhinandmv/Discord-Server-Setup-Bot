@@ -1,4 +1,8 @@
-"""Self-assign roles: persistent toggle buttons and reaction roles on the same message."""
+"""Reaction roles: one message per group in the reaction-roles channel. React to
+get a role, remove the reaction to drop it; pick-one groups swap roles.
+
+Role menus posted by older versions (toggle buttons and dropdowns) keep working
+through the persistent handlers below, but new setups only post reaction roles."""
 
 from __future__ import annotations
 
@@ -11,7 +15,6 @@ from discord.ext import commands
 from core import ui
 from core.builder import normalize_emoji
 from core.permissions import is_safe_self_assign_role
-from core.plan import split_leading_emoji
 
 log = logging.getLogger(__name__)
 
@@ -70,20 +73,83 @@ class RoleToggleButton(discord.ui.DynamicItem[discord.ui.Button],
         await interaction.response.send_message(text, ephemeral=True)
 
 
-def build_role_menu(pairs: list[tuple[discord.Role, str]]) -> tuple[discord.Embed, discord.ui.View]:
-    """pairs = [(role, emoji)]. The same emoji is used for the button and the reaction."""
-    pairs = pairs[:20]
+class RoleGroupSelect(discord.ui.DynamicItem[discord.ui.Select],
+                      template=r"rolegroup:(?P<index>[0-9]+)"):
+    """One dropdown per role group. Choosing sets your roles *within this group*
+    to exactly what you picked; roles outside the group are untouched.
+
+    The group's role IDs are the dropdown's own option values, so nothing extra
+    needs storing: discord.py rebuilds the select from the message on each use.
+    """
+
+    def __init__(self, index: int, *, placeholder: str = "Pick roles…",
+                 options: list[discord.SelectOption] | None = None,
+                 max_values: int = 1) -> None:
+        options = options or [discord.SelectOption(label="(none)", value="0")]
+        super().__init__(discord.ui.Select(
+            custom_id=f"rolegroup:{index}", placeholder=placeholder, options=options,
+            min_values=0, max_values=max(1, min(max_values, len(options)))))
+        self.index = index
+
+    @classmethod
+    async def from_custom_id(cls, interaction: discord.Interaction, item: discord.ui.Select,
+                             match: re.Match[str], /) -> RoleGroupSelect:
+        return cls(int(match["index"]), placeholder=item.placeholder or "Pick roles…",
+                   options=item.options, max_values=item.max_values)
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        guild = interaction.guild
+        member = interaction.user
+        if guild is None or not isinstance(member, discord.Member):
+            return
+        allowed = interaction.client.storage.get_json(guild.id, "self_roles", None) or []
+        group_ids = [int(o.value) for o in self.item.options if o.value.isdigit()]
+        chosen = {int(v) for v in self.item.values if v.isdigit()}
+
+        add, remove, problems = [], [], []
+        for role_id in group_ids:
+            role = guild.get_role(role_id)
+            wanted, has = role_id in chosen, role is not None and role in member.roles
+            if wanted == has:
+                continue
+            problem = _assignable_problem(guild, role, allowed)
+            if problem:
+                if wanted:
+                    problems.append(problem)
+                continue
+            (add if wanted else remove).append(role)
+
+        try:
+            if remove:
+                await member.remove_roles(*remove, reason="Self-assign role menu")
+            if add:
+                await member.add_roles(*add, reason="Self-assign role menu")
+        except discord.HTTPException as exc:
+            log.warning("Role menu failed in %s: %s", guild.id, exc)
+            await interaction.response.send_message(
+                "I couldn't change your roles. Please tell a moderator.", ephemeral=True)
+            return
+
+        lines = [f"Added {r.mention}" for r in add] + [f"Removed {r.mention}" for r in remove]
+        lines += sorted(set(problems))
+        await interaction.response.send_message("\n".join(lines) or "No changes.", ephemeral=True)
+
+
+RoleGroup = tuple[str, bool, list[tuple[discord.Role, str]]]
+
+
+def build_reaction_message(group: RoleGroup, *, first: bool = False) -> discord.Embed:
+    """One reaction-roles message: (group name, pick-one?, [(role, emoji)])."""
+    name, exclusive, pairs = group
+    how = ("React to **pick one**. Choosing another swaps it." if exclusive
+           else "React to get a role. Remove your reaction to drop it.")
     embed = discord.Embed(
-        title="🏷️ Pick your roles",
-        description="**Click a button** to add or remove a role, "
-                    "or **react with the emoji** (remove your reaction to drop the role).\n\n"
-                    + "\n".join(f"{emoji}  {role.mention}" for role, emoji in pairs),
+        title=f"✨ {name}"[:256],
+        description=how + "\n\n" + "\n".join(f"{emoji}  {role.mention}" for role, emoji in pairs[:20]),
         colour=ui.BLURPLE)
-    view = discord.ui.View(timeout=None)
-    for role, emoji in pairs:
-        _, label = split_leading_emoji(role.name)
-        view.add_item(RoleToggleButton(role.id, label=label[:80], emoji=emoji))
-    return embed, view
+    if first:
+        embed.set_author(name="Reaction roles")
+    return embed
 
 
 class RoleMenu(commands.Cog):
@@ -91,10 +157,10 @@ class RoleMenu(commands.Cog):
         self.bot = bot
 
     async def cog_load(self) -> None:
-        self.bot.add_dynamic_items(RoleToggleButton)
+        self.bot.add_dynamic_items(RoleToggleButton, RoleGroupSelect)
 
     async def cog_unload(self) -> None:
-        self.bot.remove_dynamic_items(RoleToggleButton)
+        self.bot.remove_dynamic_items(RoleToggleButton, RoleGroupSelect)
 
     # Raw events fire even for messages that aren't in the bot's cache
     # (e.g. after a restart), and need no privileged intents.
@@ -134,10 +200,35 @@ class RoleMenu(commands.Cog):
                 return
             if add and role not in member.roles:
                 await member.add_roles(role, reason="Reaction role")
+                await self._enforce_pick_one(guild, member, role, mapping, payload)
             elif not add and role in member.roles:
                 await member.remove_roles(role, reason="Reaction role removed")
         except discord.HTTPException as exc:
             log.warning("Reaction role failed in %s: %s", guild.id, exc)
+
+
+    async def _enforce_pick_one(self, guild: discord.Guild, member: discord.Member,
+                                role: discord.Role, mapping: dict[str, int],
+                                payload: discord.RawReactionActionEvent) -> None:
+        """In a pick-one group, reacting for one role drops the others (and their reactions)."""
+        groups = self.bot.storage.get_json(guild.id, "exclusive_role_groups", None) or []
+        group = next((g for g in groups if role.id in g), None)
+        if not group:
+            return
+        others = [r for r in member.roles if r.id in group and r.id != role.id]
+        if others:
+            await member.remove_roles(*others, reason="Pick-one role group")
+        channel = guild.get_channel(payload.channel_id)
+        if channel is None:
+            return
+        message = channel.get_partial_message(payload.message_id)
+        dropped = {r.id for r in others}
+        for emoji, role_id in mapping.items():
+            if role_id in dropped:  # only reactions they actually had
+                try:
+                    await message.remove_reaction(emoji, member)
+                except discord.HTTPException:
+                    pass  # cosmetic only; the role is already gone
 
 
 async def setup(bot: commands.Bot) -> None:
