@@ -1,8 +1,10 @@
 """/template: save a server's layout as a reusable template and apply it elsewhere.
 
-Templates belong to the person who saved them (not to a server), so you can
-save one in server A and apply it in server B. /template export and import
-turn a template into a .json file you can share with someone else.
+Anyone can save a template of a server they're in (only the channels they can
+see are included). Templates belong to the person who saved them, not to a
+server, so you can save one in server A and apply it in your own server B.
+Applying deletes/creates channels, so it only works in a server you own.
+/template export and import turn a template into a .json file to share.
 """
 
 from __future__ import annotations
@@ -17,7 +19,9 @@ from discord.ext import commands
 
 from core import ui
 from core.layout import LayoutApplier, as_template, layout_counts, snapshot, validate_layout
-from cogs.backup import ADMIN_PERMS, run_layout_job
+from cogs.backup import run_layout_job
+from core.permissions import owner_only
+from core.wipe import deletable_count
 
 log = logging.getLogger(__name__)
 
@@ -56,14 +60,16 @@ class ApplyView(discord.ui.View):
         self.stop()
         await interaction.response.send_modal(ui.ConfirmDeleteModal(
             title="Confirm fresh start",
-            label=f"Type DELETE to remove {len(interaction.guild.channels)} channels",
+            label=f"Type DELETE to remove "
+                  f"{deletable_count(interaction.guild, interaction.user)} channels",
             on_confirm=lambda i: self._job(i, wipe=True)))
 
 
 class Templates(commands.Cog):
+    # Anyone can save a layout and keep it in their own list; applying it is
+    # only possible in a server you own (see apply).
     template = app_commands.Group(
-        name="template", description="Save and reuse server layouts", guild_only=True,
-        default_permissions=discord.Permissions(**ADMIN_PERMS))
+        name="template", description="Save and reuse server layouts", guild_only=True)
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
@@ -82,7 +88,6 @@ class Templates(commands.Cog):
         return name in names or len(names) < MAX_TEMPLATES_PER_USER
 
     @template.command(name="save", description="Save this server's roles and channels as a template")
-    @app_commands.checks.has_permissions(**ADMIN_PERMS)
     @app_commands.describe(name="A name for the template (saving again with the same name overwrites)")
     async def save(self, interaction: discord.Interaction,
                    name: app_commands.Range[str, 1, 50]) -> None:
@@ -112,8 +117,8 @@ class Templates(commands.Cog):
                                 colour=ui.BLURPLE),
             ephemeral=True)
 
-    @template.command(name="apply", description="Build one of your templates in this server")
-    @app_commands.checks.has_permissions(**ADMIN_PERMS)
+    @template.command(name="apply", description="Build one of your templates in a server you own")
+    @owner_only()
     @app_commands.autocomplete(name=name_autocomplete)
     async def apply(self, interaction: discord.Interaction, name: str) -> None:
         layout = self._get(interaction.user.id, name)
@@ -126,8 +131,9 @@ class Templates(commands.Cog):
             description=(f"It contains **{describe(layout)}**.\n\n"
                          "➕ **Keep existing**: add what's missing. Roles, categories and channels "
                          "with the same name are reused.\n"
-                         f"🧹 **Fresh start**: delete all {len(interaction.guild.channels)} current "
-                         "channels first (a backup is saved, so `/restore` can undo it).\n\n"
+                         f"🧹 **Fresh start**: delete the "
+                         f"{deletable_count(interaction.guild, interaction.user)} current channels "
+                         "you can manage first (a backup is saved, so `/restore` can undo it).\n\n"
                          "New roles only get permissions you have yourself. Everything created is "
                          "tracked, so `/reset` can remove it."),
             colour=ui.BLURPLE)
@@ -157,7 +163,6 @@ class Templates(commands.Cog):
             file=discord.File(io.BytesIO(data), filename=f"{safe}.json"), ephemeral=True)
 
     @template.command(name="import", description="Add a template from a .json file")
-    @app_commands.checks.has_permissions(**ADMIN_PERMS)
     @app_commands.describe(file="A file made with /template export", name="Name to save it as")
     async def import_(self, interaction: discord.Interaction, file: discord.Attachment,
                       name: app_commands.Range[str, 1, 50]) -> None:

@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import discord
+from discord import app_commands
 
 # Permissions the bot needs at server level for /setup. Overwrites can only
 # allow/deny permissions the bot itself has, which is why voice/reaction perms
@@ -167,3 +168,51 @@ def is_access_role(role: discord.Role) -> bool:
     return any(allow.value for ch in role.guild.channels
                if (ow := ch.overwrites.get(role)) is not None
                for allow, _deny in [ow.pair()])
+
+
+# --------------------------------------------------------------------------- #
+# Who may run which command
+# --------------------------------------------------------------------------- #
+class NotServerOwner(app_commands.CheckFailure):
+    def __init__(self) -> None:
+        super().__init__("Only the server owner can use this command.")
+
+
+def is_server_owner(member: discord.abc.User, guild: discord.Guild | None) -> bool:
+    return guild is not None and guild.owner_id == member.id
+
+
+def owner_only():
+    """Commands that build, delete or rebuild the server: the owner only.
+
+    Discord can't hide a command from everyone but the owner, so these are also
+    marked Administrator-only (hidden from regular members) and checked here.
+    """
+    async def predicate(interaction: discord.Interaction) -> bool:
+        if not is_server_owner(interaction.user, interaction.guild):
+            raise NotServerOwner()
+        return True
+    return app_commands.check(predicate)
+
+
+# Moderation commands -> the Discord permission a moderator needs. The staff
+# role /setup creates (templates.DEFAULT_ROLES["staff"]) has all of these, so
+# giving someone that role is all it takes to make them a moderator.
+MOD_COMMAND_PERMISSIONS: dict[str, str] = {
+    "mute": "moderate_members",
+    "unmute": "moderate_members",
+    "warn": "moderate_members",
+    "warnings": "moderate_members",
+    "clearwarnings": "moderate_members",
+    "purge": "manage_messages",
+}
+
+
+def mod_command(name: str):
+    """Hide the command from members without the permission, and enforce it."""
+    perm = {MOD_COMMAND_PERMISSIONS[name]: True}
+
+    def decorator(func):
+        func = app_commands.default_permissions(**perm)(func)
+        return app_commands.checks.has_permissions(**perm)(func)
+    return decorator

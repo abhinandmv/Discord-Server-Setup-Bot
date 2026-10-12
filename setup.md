@@ -169,7 +169,8 @@ The README has the full testing checklist.
 | Commands appear twice | You synced globally once and also to the guild. Harmless; the global copies can be cleared later. |
 | "I'm missing some permissions" | Re-invite with the URL from Step 4, or enable the listed permissions on the bot's role. |
 | "Missing permissions" errors while building | The bot's role is too low. Repeat Step 5. |
-| "You need these permissions to use this command" | `/setup`, `/reset`, `/backup`, `/restore` and `/template` need **Manage Server, Manage Channels and Manage Roles** (the server owner has all of them). Moderation commands need **Timeout Members**; `/purge` needs **Manage Messages**. |
+| "Only the server owner can use this command" | `/setup`, `/reset`, `/backup`, `/restore` and `/template apply` are owner-only. Run them from the account that owns the server. |
+| "You need these permissions to use this command" | Moderation commands need **Timeout Members** (`/purge` needs **Manage Messages**). The staff role `/setup` creates has both, so give your moderators that role. |
 | `ModuleNotFoundError: discord` | Activate the venv first: `source .venv/bin/activate`. |
 | `CERTIFICATE_VERIFY_FAILED` (macOS) | Run `"/Applications/Python 3.x/Install Certificates.command"` once. |
 

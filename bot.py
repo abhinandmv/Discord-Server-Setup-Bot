@@ -13,6 +13,7 @@ from discord.ext import commands
 
 import config
 import templates
+from core.permissions import NotServerOwner
 from core.storage import Storage
 
 log = logging.getLogger("setup_bot")
@@ -62,6 +63,8 @@ class SetupBot(commands.Bot):
             text = f"You need these permissions to use this command: **{missing}**."
         elif isinstance(error, app_commands.NoPrivateMessage):
             text = "This command only works inside a server."
+        elif isinstance(error, NotServerOwner):
+            text = "🔒 Only the **server owner** can use this command."
         else:
             log.exception("Unhandled error in /%s", interaction.command and interaction.command.name,
                           exc_info=error)

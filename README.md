@@ -107,9 +107,9 @@ python bot.py
 
 ### Commands
 
-| Command | Who can use it | What it does |
-|---|---|---|
-**Admins** (need **Manage Server + Manage Channels + Manage Roles**):
+Who can use what is decided by the bot. There's nothing to configure.
+
+**🔒 Server owner only.** These build, delete or rebuild the server, so even admins can't run them. They're hidden from regular members.
 
 | Command | What it does |
 |---|---|
@@ -117,10 +117,9 @@ python bot.py
 | `/reset` | Deletes everything the bot created, after you confirm. |
 | `/backup` | Saves the current channel layout. The 10 newest backups are kept. |
 | `/restore` | Pick a backup and rebuild the channels from it (asks you to type `DELETE`). |
-| `/template save` · `list` · `apply` · `delete` | Save this server's layout as your own template and build it in any server. |
-| `/template export` · `import` | Download a template as a `.json` file, or add one someone shared with you. |
+| `/template apply` | Builds one of your templates in a server **you own**. |
 
-**Moderators:**
+**🛡️ Moderators.** Anyone with the staff role `/setup` creates (e.g. ⚔️ Knight, 🎮 Game Master, 🧑‍💼 Manager) can use these: that role already has the permissions below. To make someone a moderator, just give them the staff role.
 
 | Command | Needs | What it does |
 |---|---|---|
@@ -132,18 +131,23 @@ python bot.py
 
 Mods can't target the server owner, bots, themselves, or anyone whose highest role is equal to or above theirs.
 
-**Everyone:**
+**👥 Everyone**
 
 | Command | What it does |
 |---|---|
 | `/rank [@member]` | Shows level, XP progress, rank and the next reward. |
 | `/leaderboard` | The top 10 most active members. |
+| `/template save` | Saves the layout of a server you're in as **your** template (only channels you can see). |
+| `/template list` · `delete` | Your saved templates. They belong to you, not to a server. |
+| `/template export` · `import` | Download a template as a `.json` file, or add one someone shared with you. |
 
-### For admins: setting up your server
+So anyone can copy a server's layout they like and build it in their own server with `/template apply`.
+
+### For the server owner: setting up your server
 
 1. **Type `/setup`** in any channel and press Enter.
 2. **Pick a server type** (Gaming, Fantasy / Anime, Study group, Creator / YouTube, General hangout or Work / Team). This decides the role names, colours and channel theme.
-3. **Choose features** from the menu. With **Rules & welcome**, the theme's rules are posted in the rules channel for you. Sensible defaults are pre-selected; tick or untick what you want, then press **Next**:
+3. **Choose features** by clicking their buttons (green = on, grey = off). With **Rules & welcome**, the theme's rules are posted in the rules channel for you. Sensible defaults are pre-selected; click to turn things on or off, then press **Next**:
 
    | Feature | What you get |
    |---|---|
@@ -288,11 +292,13 @@ More in [setup.md](setup.md#troubleshooting).
 - **Verification** hides channels from members who haven't verified, including people who were already in the server. Admins and the staff role always see everything.
 - **Backups and templates** hold channel names, order, topics, settings and permissions, but not messages. Restoring rebuilds stage channels as voice channels.
 - **Templates** only include channels the person saving them can see, and never include member-specific permissions.
-- **Permission safety:** `/setup` and `/reset` require Manage Server, Manage Channels **and** Manage Roles, so nobody can use the bot to do more than they could themselves:
+- **Permission safety:** `/setup`, `/reset`, `/backup`, `/restore` and `/template apply` are **server-owner only**. The checks below still apply as a second layer, so the bot never does more than the person asking could do themselves:
   - New roles only get permissions that the person running `/setup` has.
   - Fresh start and `/reset` won't delete roles above that person's highest role.
   - An existing role is only made a reaction role or level reward if it has no moderator/admin permissions, doesn't unlock any channels, **and** the person running `/setup` could assign it themselves.
-  - Restore and template permissions are capped the same way: nothing is granted that the person running it doesn't have.
+  - Restore and template permissions are capped the same way: nothing is granted that the person running it doesn't have, and channel permissions for roles at or above their highest role are left out.
+  - Fresh start, `/restore` and `/template apply` only delete channels the person running them can see and manage. Hidden channels are left alone.
+  - If a fresh start can't delete every old channel, verification stays on (no auto-role), so surviving members-only channels never open up by accident.
   - The verify button, auto-role, level rewards and `/mute` re-check each role every time. If someone later gives that role moderator permissions, the bot stops handing it out.
 - **Role icons** (images next to names) need Server Boost level 2, so the role emoji are part of the names instead.
 - **Limits per run:** 10 extra channels, 20 subjects, 20 reaction roles in up to 5 groups.

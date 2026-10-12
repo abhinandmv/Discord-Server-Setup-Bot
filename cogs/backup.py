@@ -16,16 +16,11 @@ from discord.ext import commands
 
 from core import ui
 from core.layout import LayoutApplier, LayoutResult, layout_counts, snapshot
-from core.permissions import missing_bot_permissions
+from core.permissions import is_server_owner, missing_bot_permissions, owner_only
+from core.wipe import deletable_count
 
 log = logging.getLogger(__name__)
 
-ADMIN_PERMS = {"manage_guild": True, "manage_channels": True, "manage_roles": True}
-
-
-def has_admin_perms(member: discord.Member) -> bool:
-    perms = member.guild_permissions
-    return perms.manage_guild and perms.manage_channels and perms.manage_roles
 
 
 def counts_text(layout: dict) -> str:
@@ -79,9 +74,9 @@ async def run_layout_job(bot, interaction: discord.Interaction,
         return
     async with lock:
         # Permissions may have changed while the confirmation was open.
-        if not has_admin_perms(interaction.user):
-            await reply(discord.Embed(description="You need Manage Server, Manage Channels and "
-                                                  "Manage Roles. Nothing was changed.", colour=ui.RED))
+        if not is_server_owner(interaction.user, guild):
+            await reply(discord.Embed(description="Only the server owner can do this. Nothing was "
+                                                  "changed.", colour=ui.RED))
             return
         missing = missing_bot_permissions(guild.me.guild_permissions)
         if missing:
@@ -139,8 +134,9 @@ class RestoreView(discord.ui.View):
             return
         embed = discord.Embed(
             title=f"♻️ Restore backup #{self.chosen}?",
-            description=(f"This **deletes all {len(guild.channels)} current channels and "
-                         f"categories** and recreates {counts_text(layout)} from the backup, with "
+            description=(f"This **deletes {deletable_count(guild, interaction.user)} current "
+                         f"channels and categories** (any you can't manage are left alone) and "
+                         f"recreates {counts_text(layout)} from the backup, with "
                          "their original names, order and permissions.\n\n"
                          "• Your current layout is backed up first, so you can undo this.\n"
                          "• Messages can't be restored; the channels come back empty.\n"
@@ -170,7 +166,8 @@ class RestoreView(discord.ui.View):
                 "♻️ Restoring backup", f"✅ Backup #{backup_id} restored")
 
         await interaction.response.send_modal(ui.ConfirmDeleteModal(
-            title="Confirm restore", label=f"Type DELETE to replace {len(interaction.guild.channels)} channels",
+            title="Confirm restore", label=f"Type DELETE to replace "
+                  f"{deletable_count(interaction.guild, interaction.user)} channels",
             on_confirm=confirmed))
 
 
@@ -180,8 +177,8 @@ class Backup(commands.Cog):
 
     @app_commands.command(name="backup", description="Save the current channel layout")
     @app_commands.guild_only()
-    @app_commands.default_permissions(**ADMIN_PERMS)
-    @app_commands.checks.has_permissions(**ADMIN_PERMS)
+    @app_commands.default_permissions(administrator=True)
+    @owner_only()
     async def backup(self, interaction: discord.Interaction) -> None:
         layout = snapshot(interaction.guild)
         backup_id = self.bot.storage.add_backup(interaction.guild.id,
@@ -193,8 +190,8 @@ class Backup(commands.Cog):
 
     @app_commands.command(name="restore", description="Rebuild the channels from a saved backup")
     @app_commands.guild_only()
-    @app_commands.default_permissions(**ADMIN_PERMS)
-    @app_commands.checks.has_permissions(**ADMIN_PERMS)
+    @app_commands.default_permissions(administrator=True)
+    @owner_only()
     async def restore(self, interaction: discord.Interaction) -> None:
         backups = self.bot.storage.backups(interaction.guild.id)
         if not backups:

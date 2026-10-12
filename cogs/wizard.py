@@ -25,7 +25,8 @@ from discord.ext import commands
 import templates
 from core import ui
 from core.builder import Builder, BuildResult
-from core.permissions import PRESET_LABELS, missing_bot_permissions
+from core.permissions import PRESET_LABELS, is_server_owner, missing_bot_permissions, owner_only
+from core.wipe import deletable_count
 from core.plan import (MAX_EXTRA_CHANNELS, MAX_ROLE_GROUPS, MAX_SELF_ROLES, MAX_SUBJECTS, Plan,
                        WizardAnswers, build_plan, find_conflicts, followups_for,
                        format_role_groups, parse_list, parse_role_groups)
@@ -196,10 +197,9 @@ class Wizard(commands.Cog):
     # ------------------------------------------------------------------ #
     @app_commands.command(name="setup", description="Run the server setup wizard")
     @app_commands.guild_only()
-    # The bot creates/deletes channels and roles for the invoker, so they must be
-    # allowed to do that themselves; Manage Server alone isn't enough.
-    @app_commands.default_permissions(manage_guild=True, manage_channels=True, manage_roles=True)
-    @app_commands.checks.has_permissions(manage_guild=True, manage_channels=True, manage_roles=True)
+    # Building (and fresh start) reshapes the whole server: owner only.
+    @app_commands.default_permissions(administrator=True)
+    @owner_only()
     async def setup_command(self, interaction: discord.Interaction) -> None:
         guild = interaction.guild
         assert guild is not None
@@ -348,29 +348,35 @@ class Wizard(commands.Cog):
         embed = discord.Embed(
             title=f"{t.get('emoji', '')} {t['label']}: features".strip(),
             description="**Step 2: Which features do you want?**\n"
-                        "I've pre-selected sensible defaults for this server type. "
-                        "Change the selection, then press **Next**.",
+                        "Click a feature to turn it on (green) or off (grey). Sensible defaults for "
+                        "this server type are already on. Press **Next** when you're happy.\n\n"
+                        + "\n".join(
+                            f"{'✅' if k in a.features else '⬜'} {f.get('emoji', '')} "
+                            f"**{f['label']}**: {f['description']}"
+                            for k, f in templates.FEATURES.items()),
             colour=ui.BLURPLE)
 
+        # Toggle buttons rather than a multi-select: Discord only sends a
+        # multi-select's choice when the menu closes, so clicking Next while it
+        # was open just closed it and Next had to be clicked twice.
         view = WizardView(self, session)
-        select = discord.ui.Select(
-            placeholder="Choose features…", min_values=0, max_values=len(templates.FEATURES), row=0,
-            options=[discord.SelectOption(label=f["label"], value=k, emoji=f.get("emoji"),
-                                          description=f["description"][:100],
-                                          default=k in a.features)
-                     for k, f in templates.FEATURES.items()])
-
-        async def on_select(i: discord.Interaction) -> None:
-            a.features = [k for k in templates.FEATURES if k in select.values]
-            await i.response.defer()  # just remember the choice; the menu shows it already
-
-        select.callback = on_select
-        view.add_item(select)
+        for n, (key, f) in enumerate(templates.FEATURES.items()):
+            on = key in a.features
+            view.add_item(_button(
+                f["label"], discord.ButtonStyle.success if on else discord.ButtonStyle.secondary,
+                partial(self.on_toggle_feature, session=session, key=key),
+                emoji=f.get("emoji"), row=n // 5))
         view.add_item(_button("Back", discord.ButtonStyle.secondary,
-                              partial(self.on_back_to_type, session=session), row=1))
+                              partial(self.on_back_to_type, session=session), row=3))
         view.add_item(_button("Next", discord.ButtonStyle.primary,
-                              partial(self.on_open_details, session=session), row=1))
+                              partial(self.on_open_details, session=session), row=3))
         await self.render(interaction, session, embed, view)
+
+    async def on_toggle_feature(self, interaction: discord.Interaction, *,
+                                session: WizardSession, key: str) -> None:
+        chosen = set(session.answers.features) ^ {key}
+        session.answers.features = [k for k in templates.FEATURES if k in chosen]
+        await self.step_features(interaction, session)
 
     async def on_back_to_type(self, interaction: discord.Interaction, *,
                               session: WizardSession) -> None:
@@ -526,7 +532,7 @@ class Wizard(commands.Cog):
             title="🏗️ How should I build?",
             description=(
                 f"Your server currently has **{len(guild.channels)}** channels and categories.\n\n"
-                "🧹 **Fresh start**: delete **every** existing channel and category "
+                "🧹 **Fresh start**: delete **every** existing channel and category you can manage "
                 + (f"(plus the {tracked_roles} role(s) I made in earlier setups) " if tracked_roles else "")
                 + "and build everything new. Other roles are kept. A backup of the current "
                 "channel layout is saved first, so `/restore` can bring the channels back, but "
@@ -604,9 +610,14 @@ class Wizard(commands.Cog):
                          "➕ new · ♻️ already exists, will be reused · ➕⚠️ duplicate name"),
             colour=ui.RED if plan.wipe else ui.BLURPLE)
         if plan.wipe:
-            embed.description = (f"🧹 **FRESH START: all {len(guild.channels)} existing channels "
-                                 "and categories will be deleted first.** You'll be asked to type "
-                                 "DELETE to confirm.\n\n" + embed.description)
+            member = guild.get_member(session.user_id)
+            n = deletable_count(guild, member) if member else len(guild.channels)
+            hidden = len(guild.channels) - n
+            embed.description = (f"🧹 **FRESH START: {n} existing channels and categories will be "
+                                 "deleted first.** You'll be asked to type DELETE to confirm."
+                                 + (f" {hidden} you can't see or manage will be left alone."
+                                    if hidden else "")
+                                 + "\n\n" + embed.description)
 
         role_lines = []
         for r in plan.roles:
@@ -681,7 +692,7 @@ class Wizard(commands.Cog):
     async def on_confirm(self, interaction: discord.Interaction, *, session: WizardSession) -> None:
         if session.wipe:
             await interaction.response.send_modal(
-                WipeConfirmModal(self, session, len(interaction.guild.channels)))
+                WipeConfirmModal(self, session, deletable_count(interaction.guild, interaction.user)))
         else:
             await self.start_build(interaction, session)
 
@@ -696,11 +707,9 @@ class Wizard(commands.Cog):
 
         async with lock:
             self.end(session)
-            perms = interaction.user.guild_permissions
-            if not (perms.manage_guild and perms.manage_channels and perms.manage_roles):
+            if not is_server_owner(interaction.user, guild):  # ownership may have moved
                 await interaction.response.edit_message(
-                    embed=discord.Embed(description="You no longer have Manage Server, Manage "
-                                                    "Channels and Manage Roles, so I stopped. "
+                    embed=discord.Embed(description="Only the server owner can run setup. "
                                                     "Nothing was changed.", colour=ui.RED),
                     view=None)
                 return
