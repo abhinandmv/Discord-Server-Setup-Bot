@@ -1,6 +1,9 @@
 # 🧙 Discord Server Setup Wizard
 
-A Discord bot that builds a complete, themed server for you, then helps run it. Run `/setup`, answer a few interactive questions (buttons, menus and pop-up forms), and the bot creates styled roles, categories and channels with permissions already set up. It also handles verification, welcome messages, reaction roles, support tickets, leveling, live stats and moderation, and can back up, restore and copy server layouts.
+A Discord bot that builds a complete, themed server for you, then helps run it. Run `/setup`, answer a few interactive questions (buttons, menus and pop-up forms), and the bot creates styled roles, categories and channels with permissions already set up. It also runs the server day to day:
+- **Members:** verification, welcome messages, reaction roles, leveling, giveaways, suggestions, birthdays and join-to-create voice rooms.
+- **Moderators:** support tickets, moderation with automatic escalation, lockdowns, Discord AutoMod, and a log of edited and deleted messages.
+- **Admins:** live stats, announcements and reminders, plus backups, restore and reusable server templates.
 
 Built with [discord.py](https://github.com/Rapptz/discord.py) 2.x.
 
@@ -38,7 +41,14 @@ Built with [discord.py](https://github.com/Rapptz/discord.py) 2.x.
 - **✨ Reaction roles:** a dedicated channel with one message per group (e.g. Platform, Pings, Name color), emoji already added. React to get a role, un-react to drop it. "Pick one" groups swap your role when you choose another, and groups with "color" in the name get coloured roles. Every type except Work has its own themed set, e.g. Fantasy's *🎖️┃choose-your-path* has a Class, an Allegiance (🐲 House of Flame, 🌊 House of Tides…), favourite genres and pings.
 - **⭐ Leveling:** members earn XP for chatting and unlock the theme's rank roles. `/rank` and `/leaderboard` show progress.
 - **📊 Live stats:** locked voice channels showing the member and boost counts, updated every 10 minutes.
-- **🛡️ Moderation:** `/mute` (with optional duration), `/unmute`, `/warn`, `/warnings`, `/clearwarnings` and `/purge`. Every action, ticket, join and leave goes to the **mod-log** channel.
+- **🛡️ Moderation:** `/mute` (with optional duration), `/unmute`, `/warn`, `/warnings`, `/clearwarnings`, `/purge`, and `/lockdown` / `/unlock` for raids. Warnings escalate automatically: 3 warnings is a 1-hour mute, 5 a 1-day mute, 7 a 1-week mute. Every action, ticket, join and leave goes to the **mod-log** channel.
+- **🤖 AutoMod:** sets up Discord's built-in filter to block slurs, sexual content, spam, mass mentions and scam links, with alerts in the mod log. Because Discord runs the filter, it works even while the bot is offline.
+- **📝 Message log:** edited and deleted messages, with the old text, go to a staff-only message-log channel.
+- **➕ Join-to-create voice:** join "Create a room" to get your own themed voice channel (e.g. *🐉 Kiri's Lair*), deleted when everyone leaves. The owner can rename it and set a user limit.
+- **🎉 Giveaways:** `/giveaway start`, entered with a button. Winners are drawn automatically, and a **🔁 Reroll** button lets the host pick a new winner if someone doesn't claim their prize.
+- **💡 Suggestions:** `/suggest` posts an idea for 👍/👎 voting, and staff approve or decline it with a note. The author is DM'd the decision.
+- **🎂 Birthdays:** `/birthday set`. On the day, members get a 🎂 Birthday role and a themed shout-out.
+- **📣 `/announce`** (styled announcements), **⏰ `/remind`** (personal or repeating channel reminders), and **❓ `/help`** (shows only the commands you can use).
 - **🧹 Fresh start (optional):** deletes all existing channels and builds from scratch. You must type `DELETE` to confirm.
 - **💾 Backups:** the layout is saved automatically before anything deletes channels, and `/restore` brings it back. `/backup` saves one any time.
 - **📐 Templates:** save a server's layout and apply it in another server. Export it as a file to share.
@@ -84,11 +94,11 @@ python bot.py
 
 ### Developer Portal settings
 
-- **Bot** tab: turn **on Server Members Intent**. It's needed for welcome messages, verification, auto-role and the join/leave log, and the bot won't start without it. Presence and Message Content can stay **off**; leveling only counts messages and never reads them. Turn off **Requires OAuth2 Code Grant**.
+- **Bot** tab: turn **on Server Members Intent** and **Message Content Intent**; the bot won't start without them. Server Members is for welcome messages, verification, auto-role and the join/leave log. Message Content is for logging edited and deleted messages. Presence can stay off. Turn off **Requires OAuth2 Code Grant**.
 - **Invite URL** (replace `YOUR_APPLICATION_ID`):
 
   ```
-  https://discord.com/oauth2/authorize?client_id=YOUR_APPLICATION_ID&permissions=1477904034896&scope=bot+applications.commands
+  https://discord.com/oauth2/authorize?client_id=YOUR_APPLICATION_ID&permissions=1477904034928&scope=bot+applications.commands
   ```
 
   - **Scopes:** `bot` and `applications.commands`
@@ -98,6 +108,7 @@ python bot.py
     - Embed Links, Attach Files, Read Message History, Add Reactions
     - Connect, Speak
     - Manage Messages, Timeout/Mute/Deafen/Move Members, Manage Nicknames (so the staff role can be given these)
+    - Manage Server (to set up AutoMod and pause invites during a lockdown)
 
 > ⚠️ **After inviting**, open Server Settings → Roles and drag the bot's role to the **top**. Discord only lets a bot manage roles below its own.
 
@@ -128,6 +139,11 @@ Who can use what is decided by the bot. There's nothing to configure.
 | `/warn @member reason` | Timeout Members | Records a warning and DMs them. |
 | `/warnings @member` · `/clearwarnings @member` | Timeout Members | Shows or clears their warnings. |
 | `/purge amount [@member]` | Manage Messages | Deletes up to 100 recent messages here, optionally only from one member. |
+| `/lockdown [channel/server] [pause_invites] [reason]` | Timeout Members | Stops everyone except staff from talking. The server-wide version can also pause new joins. |
+| `/unlock [channel/server]` | Timeout Members | Ends the lockdown and restores the exact previous permissions. |
+| `/giveaway start prize duration [winners]` · `/giveaway end id` | Timeout Members | Runs a giveaway in this channel. Only the host or the owner can end it early or reroll. |
+| `/announce [#channel] [ping]` | Manage Messages | Opens a form for a styled announcement. Pinging @everyone needs that permission too. |
+| `/remind channel #channel when text [repeat]` | Manage Messages | Repeating channel reminders, e.g. a weekday standup at `09:00` with `utc_offset +5:30`. |
 
 Mods can't target the server owner, bots, themselves, or anyone whose highest role is equal to or above theirs.
 
@@ -137,6 +153,10 @@ Mods can't target the server owner, bots, themselves, or anyone whose highest ro
 |---|---|
 | `/rank [@member]` | Shows level, XP progress, rank and the next reward. |
 | `/leaderboard` | The top 10 most active members. |
+| `/help` | Lists the commands you can use. |
+| `/suggest idea` | Posts a suggestion for everyone to vote on. |
+| `/birthday set` · `remove` · `upcoming` | Your birthday (no year), and who's celebrating soon. |
+| `/remind me when text [repeat]` · `list` · `delete` | DM reminders, e.g. `when: 2h` or `when: 09:00`. |
 | `/template save` | Saves the layout of a server you're in as **your** template (only channels you can see). |
 | `/template list` · `delete` | Your saved templates. They belong to you, not to a server. |
 | `/template export` · `import` | Download a template as a `.json` file, or add one someone shared with you. |
@@ -162,6 +182,10 @@ So anyone can copy a server's layout they like and build it in their own server 
    | ✨ Reaction roles | A dedicated channel where members react with emoji to get roles |
    | ⭐ Leveling | XP for chatting, a level-ups channel and themed rank rewards |
    | 📊 Live server stats | Locked voice channels showing member and boost counts |
+   | 🛡️ AutoMod | Discord's filter blocks slurs, spam, mass mentions and scam links |
+   | ➕ Join-to-create voice | A "Create a room" channel that makes personal voice rooms |
+   | 💡 Suggestions | A suggestions channel fed by `/suggest` |
+   | 🎂 Birthdays | A birthdays channel and a 🎂 Birthday role for the day |
 
 4. **Fill in the details form.** The staff and member role names are pre-filled with the theme (e.g. `⚔️ Knight` / `🪓 Viking`). Change them if you like. You can also add extra channels, comma-separated (e.g. `art, 🎲 board games`).
 5. **Answer the follow-up questions.** They only appear when relevant:
@@ -228,6 +252,9 @@ Everything lives in [`templates.py`](templates.py). No other code needs to chang
 - **New category:** add it to `CATEGORIES` with a permission preset (`public`, `announcement`, `readonly`, `staff_only`, `tickets` or `locked`).
 - **Channels:** use `text(name, category, preset, emoji="📢")` and `voice(name, category, emoji="🔊")`. Text channels are shown as `📢┃name`. Pass `ungated=True` to keep a channel visible before members verify.
 - **Leveling speed:** `XP_PER_MESSAGE` and `XP_COOLDOWN_SECONDS`.
+- **Warning escalation:** `WARN_ESCALATION`, e.g. `[(3, 3600), (5, 86400)]` means 3 warnings = 1-hour mute.
+- **AutoMod:** `AUTOMOD_BLOCKED_KEYWORDS` (scam phrases, `*` = wildcard) and `AUTOMOD_MENTION_LIMIT`.
+- **Themed text:** each server type's `room_name` (join-to-create rooms) and `birthday_message`.
 
 `templates.validate()` runs at startup and reports typos such as an unknown category, preset, feature or renamed channel.
 
@@ -259,7 +286,16 @@ cogs/
   welcome.py        welcome messages, verify button, auto-role, join/leave log
   leveling.py       XP, level rewards, /rank, /leaderboard
   stats.py          live member/boost count channels
-  moderation.py     /mute, /unmute, /warn, /warnings, /clearwarnings, /purge
+  moderation.py     /mute, /unmute, /warn (+ escalation), /warnings, /clearwarnings, /purge,
+                    /lockdown, /unlock
+  temp_voice.py     join-to-create voice rooms
+  giveaways.py      /giveaway with enter and reroll buttons
+  suggestions.py    /suggest with voting and staff approve/decline
+  birthdays.py      /birthday, daily birthday role and shout-out
+  announce.py       /announce
+  reminders.py      /remind
+  message_log.py    edited/deleted message log
+  help.py           /help
 Dockerfile          container image for running 24/7
 setup.md            step-by-step first-time setup guide
 ```
@@ -270,7 +306,9 @@ setup.md            step-by-step first-time setup guide
 
 | Problem | Fix |
 |---|---|
-| Bot exits with "needs the Server Members intent" | Developer Portal → Bot → turn on **Server Members Intent** → Save, then start it again. |
+| Bot exits with "needs two privileged intents" | Developer Portal → Bot → turn on **Server Members Intent** and **Message Content Intent** → Save, then start it again. |
+| Log repeats "session has been invalidated" and the bot never comes online | **Message Content Intent** (or Server Members) is off. Turn it on (Developer Portal → Bot), save, and restart. After 45 seconds the bot also logs this hint. |
+| "AutoMod was skipped" | Give the bot's role **Manage Server** (Server Settings → Roles), or re-invite it with the link above, then run `/setup` again. |
 | `/setup` doesn't appear | Check `TEST_GUILD_ID`, then reload Discord (Ctrl/Cmd+R). The invite must include `applications.commands`. |
 | "I'm missing some permissions" | Re-invite with the URL above, or enable the listed permissions on the bot's role. |
 | Roles fail to create or assign | Drag the bot's role to the top of the role list. |
@@ -285,6 +323,10 @@ More in [setup.md](setup.md#troubleshooting).
 ---
 
 ## ⚠️ Notes and limits
+
+- **Message log** only knows the old text of messages the bot saw while running (it remembers the last 5,000). Older ones show "(not in my memory)".
+- **Birthdays, giveaways and reminders** use UTC. Reminders accept a `utc_offset` for times of day, and every time shown is a Discord timestamp that appears in each person's own time zone.
+- **Server-wide lockdown** turns off sending for @everyone. Channels that explicitly allow @everyone to send (made by hand) stay open, so lock those individually.
 
 - **Fresh start** can't delete the rules or updates channels that Discord requires on **Community** servers. They're skipped and listed as a warning.
 - **Muted** is applied to every pre-existing channel, one API call each, so this is slow on very large servers.

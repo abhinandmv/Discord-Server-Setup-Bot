@@ -16,7 +16,9 @@ from core.storage import Storage
 # channel is gone, so a wipe forgets them (a new setup writes fresh ones).
 CHANNEL_SETTINGS = ("reaction_roles", "exclusive_role_groups", "ticket_category_id",
                     "mod_log_channel_id", "welcome_channel_id", "level_channel_id",
-                    "verify_channel_id", "stat_channels", "verify_enabled", "tickets_enabled")
+                    "verify_channel_id", "stat_channels", "verify_enabled", "tickets_enabled",
+                    "suggestions_channel_id", "birthday_channel_id", "message_log_channel_id",
+                    "voice_hubs", "temp_voice_channels")
 
 Tick = Callable[[str, int, int], Awaitable[None]]
 

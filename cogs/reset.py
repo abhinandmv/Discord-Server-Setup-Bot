@@ -17,9 +17,9 @@ from core.storage import TrackedItem
 log = logging.getLogger(__name__)
 
 # Delete messages first, then channels, then categories (so they're empty), then roles.
-DELETE_ORDER = {"message": 0, "channel": 1, "category": 2, "role": 3}
+DELETE_ORDER = {"message": 0, "automod": 0, "channel": 1, "category": 2, "role": 3}
 KIND_LABELS = {"role": "roles", "category": "categories", "channel": "channels",
-               "message": "bot messages"}
+               "message": "bot messages", "automod": "AutoMod rules"}
 
 
 class ResetConfirmView(discord.ui.View):
@@ -65,7 +65,7 @@ class Reset(commands.Cog):
             return guild.get_role(item.item_id)
         if item.kind in ("channel", "category"):
             return guild.get_channel(item.item_id)
-        return item  # messages can't be looked up from cache; assume present
+        return item  # messages and AutoMod rules aren't cached; assume present
 
     @app_commands.command(name="reset", description="Delete everything the setup wizard created")
     @app_commands.guild_only()
@@ -92,8 +92,8 @@ class Reset(commands.Cog):
 
         counts = Counter(i.kind for i in items)
         summary = ", ".join(f"**{counts[k]}** {KIND_LABELS[k]}" for k in DELETE_ORDER if counts[k])
-        names = [f"@{i.name}" if i.kind == "role" else f"📁 {i.name}" if i.kind == "category"
-                 else f"#{i.name}" for i in items if i.kind != "message"]
+        prefix = {"role": "@", "category": "📁 ", "automod": "AutoMod: "}
+        names = [f"{prefix.get(i.kind, '#')}{i.name}" for i in items if i.kind != "message"]
         embed = discord.Embed(
             title="🗑️ Reset server setup?",
             description=f"This permanently deletes {summary} that **this bot created**.\n"
@@ -162,6 +162,10 @@ class Reset(commands.Cog):
     async def _delete(self, guild: discord.Guild, item: TrackedItem, channel_ids: set[int]) -> bool:
         """Delete one tracked item. Returns False if it was already gone."""
         reason = "Server setup /reset"
+        if item.kind == "automod":
+            rule = await guild.fetch_automod_rule(item.item_id)  # NotFound -> untracked by caller
+            await call_with_retry(lambda: rule.delete(reason=reason), delay=0.4)
+            return True
         if item.kind == "message":
             channel = guild.get_channel(item.parent_id)
             if item.parent_id in channel_ids or channel is None:

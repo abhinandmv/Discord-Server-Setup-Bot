@@ -73,7 +73,8 @@ class Builder:
         posts = (int(bool(self.plan.reaction_groups))
                  + int(self.plan.ticket_role is not None) + int("verification" in self.plan.features)
                  + int("rules_welcome" in self.plan.features))  # upper bound; rules may be skipped
-        creates = len(self.plan.roles) + len(self.plan.categories) + len(self.plan.channels()) + posts
+        creates = (len(self.plan.roles) + len(self.plan.categories) + len(self.plan.channels())
+                   + posts + int("automod" in self.plan.features))
         self._total = len(wipe_channels) + len(wipe_roles) + creates
 
         if self.plan.wipe:
@@ -106,6 +107,9 @@ class Builder:
         await self._create_channels()
         await self._mute_existing(existing)
         await self._post_menus()
+        if "automod" in self.plan.features:
+            await self._setup_automod()
+            await self._tick("Setting up AutoMod", 1, 1)
         self._save_settings()
         return self.result
 
@@ -434,6 +438,71 @@ class Builder:
         rules = self.specials.get("rules")
         await self._post_panel("verify", lambda: build(self.ctx.gate, rules))
 
+    # ------------------------------------------------------------------ #
+    # AutoMod (Discord's built-in filter; keeps working while the bot is offline)
+    # ------------------------------------------------------------------ #
+    async def _setup_automod(self) -> None:
+        guild = self.guild
+        if not guild.me.guild_permissions.manage_guild:
+            self.result.warnings.append(
+                "AutoMod was skipped: I need the **Manage Server** permission to set it up. Give "
+                "my role that permission (or re-invite me with the README link) and run /setup again.")
+            return
+        try:
+            existing = await guild.fetch_automod_rules()
+        except discord.HTTPException as exc:
+            self.result.errors.append(f"AutoMod: {describe_error(exc)}")
+            return
+
+        mine = {i.item_id for i in self.storage.items(guild.id) if i.kind == "automod"}
+        log_channel = self.specials.get("mod_log")
+        staff = self.roles.get("staff")
+        T = discord.AutoModRuleTriggerType
+
+        def actions(block_text: str) -> list[discord.AutoModRuleAction]:
+            out = [discord.AutoModRuleAction(custom_message=block_text)]
+            if log_channel is not None:
+                out.append(discord.AutoModRuleAction(channel_id=log_channel.id))
+            return out
+
+        rules = [
+            ("🛡️ Block slurs and sexual content", discord.AutoModTrigger(
+                type=T.keyword_preset,
+                presets=discord.AutoModPresets(slurs=True, sexual_content=True)),
+             "That message contains language that isn't allowed here."),
+            ("🛡️ Block spam", discord.AutoModTrigger(type=T.spam),
+             "That looked like spam, so it was blocked."),
+            ("🛡️ Block mass mentions", discord.AutoModTrigger(
+                type=T.mention_spam, mention_limit=templates.AUTOMOD_MENTION_LIMIT,
+                mention_raid_protection=True),
+             f"Please don't mention more than {templates.AUTOMOD_MENTION_LIMIT - 1} people at once."),
+            ("🛡️ Block scam links", discord.AutoModTrigger(
+                type=T.keyword, keyword_filter=templates.AUTOMOD_BLOCKED_KEYWORDS),
+             "That looks like a scam, so it was blocked."),
+        ]
+        for name, trigger, block_text in rules:
+            same_type = [r for r in existing if r.trigger.type == trigger.type]
+            # Replace rules we made in an earlier setup; leave people's own rules alone.
+            for old in [r for r in same_type if r.id in mine]:
+                try:
+                    await call_with_retry(lambda: old.delete(reason=REASON), delay=self.delay)
+                    self.storage.untrack(guild.id, old.id)
+                    same_type.remove(old)
+                except discord.HTTPException:
+                    pass
+            # Discord allows one rule each of these types (and up to 6 keyword rules).
+            if same_type and trigger.type is not T.keyword:
+                self.result.reused.append(f"AutoMod: {same_type[0].name}")
+                continue
+            try:
+                rule = await call_with_retry(lambda: guild.create_automod_rule(
+                    name=name, event_type=discord.AutoModRuleEventType.message_send,
+                    trigger=trigger, actions=actions(block_text), enabled=True,
+                    exempt_roles=[staff] if staff else [], reason=REASON), delay=self.delay)
+                self._track(rule, "automod", name)
+            except discord.HTTPException as exc:
+                self.result.errors.append(f"AutoMod rule '{name}': {describe_error(exc)}")
+
     def _save_settings(self) -> None:
         """Settings the other cogs (tickets, role menu, welcome, leveling, stats) read later."""
         gid = self.guild.id
@@ -473,10 +542,21 @@ class Builder:
             store.set_json(gid, "level_roles", rewards)
 
         for special, key in (("welcome", "welcome_channel_id"), ("mod_log", "mod_log_channel_id"),
-                             ("level_up", "level_channel_id"), ("verify", "verify_channel_id")):
+                             ("level_up", "level_channel_id"), ("verify", "verify_channel_id"),
+                             ("suggestions", "suggestions_channel_id"),
+                             ("birthdays", "birthday_channel_id"),
+                             ("message_log", "message_log_channel_id")):
             if (channel := self.specials.get(special)) is not None:
                 store.set_setting(gid, key, str(channel.id))
         # The label is the name without a count, in case an old stat channel was reused.
+        if (hub := self.specials.get("voice_hub")) is not None:
+            hubs = set(store.get_json(gid, "voice_hubs", None) or [])
+            store.set_json(gid, "voice_hubs", sorted(hubs | {hub.id}))
+        if (birthday := self._bot_can_give("birthday")) is not None:
+            store.set_setting(gid, "birthday_role_id", str(birthday.id))
+        elif "birthday" in self.roles:
+            self.result.warnings.append("The birthday role already existed and isn't safe to hand "
+                                        "out automatically, so birthdays won't give a role.")
         stats = {str(ch.id): {"kind": special[len("stat_"):],
                               "label": re.sub(r":\s*[\d,]+$", "", ch.name)}
                  for special, ch in self.specials.items() if special.startswith("stat_")}
