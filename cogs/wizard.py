@@ -663,10 +663,28 @@ class Wizard(commands.Cog):
             notes.append("⭐ Members earn XP for chatting; `/rank` and `/leaderboard` show progress.")
         if "server_stats" in plan.features:
             notes.append("📊 Stat channels update every 10 minutes.")
+        if "automod" in plan.features:
+            notes.append("🛡️ AutoMod blocks slurs, spam, mass mentions and scam links "
+                         "(needs my **Manage Server** permission).")
+        if "temp_voice" in plan.features:
+            notes.append("➕ Joining **Create a room** gives members their own voice channel.")
+        if "suggestions" in plan.features:
+            notes.append("💡 Members post ideas with `/suggest`; staff approve or decline them.")
+        if "birthdays" in plan.features:
+            notes.append("🎂 Members set `/birthday set` and get a role and shout-out on the day.")
+        if "staff_area" in plan.features:
+            notes.append("📝 Edited and deleted messages are logged in the staff message-log.")
         if plan.wipe:
             notes.append("💾 The current layout is backed up before anything is deleted.")
-        if notes:
-            embed.add_field(name="Also", value=ui.clip("\n".join(notes)), inline=False)
+        # Split across fields: each embed field holds at most 1024 characters.
+        chunks: list[list[str]] = []
+        for note in notes:
+            if not chunks or len("\n".join(chunks[-1] + [note])) > 1024:
+                chunks.append([])
+            chunks[-1].append(ui.clip(note, 1024))
+        for n, chunk in enumerate(chunks):
+            embed.add_field(name="Also" if n == 0 else "Also (continued)", value="\n".join(chunk),
+                            inline=False)
         return ui.fit_embed(embed)
 
     @staticmethod

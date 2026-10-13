@@ -56,6 +56,47 @@ CREATE TABLE IF NOT EXISTS warnings (
     reason       TEXT    NOT NULL,
     created_at   TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+CREATE TABLE IF NOT EXISTS giveaways (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id   INTEGER NOT NULL,
+    channel_id INTEGER NOT NULL,
+    message_id INTEGER,
+    host_id    INTEGER NOT NULL,
+    prize      TEXT    NOT NULL,
+    winners    INTEGER NOT NULL,
+    ends_at    REAL    NOT NULL,
+    ended      INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS giveaway_entries (
+    giveaway_id INTEGER NOT NULL,
+    user_id     INTEGER NOT NULL,
+    won         INTEGER NOT NULL DEFAULT 0,   -- 1 once picked (so rerolls pick someone new)
+    PRIMARY KEY (giveaway_id, user_id)
+);
+CREATE TABLE IF NOT EXISTS suggestions (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id   INTEGER NOT NULL,
+    message_id INTEGER,
+    author_id  INTEGER NOT NULL,
+    text       TEXT    NOT NULL,
+    status     TEXT    NOT NULL DEFAULT 'open'
+);
+CREATE TABLE IF NOT EXISTS birthdays (
+    guild_id INTEGER NOT NULL,
+    user_id  INTEGER NOT NULL,
+    month    INTEGER NOT NULL,
+    day      INTEGER NOT NULL,
+    PRIMARY KEY (guild_id, user_id)
+);
+CREATE TABLE IF NOT EXISTS reminders (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id   INTEGER NOT NULL,
+    user_id    INTEGER NOT NULL,   -- who set it
+    channel_id INTEGER,            -- NULL = DM the user
+    text       TEXT    NOT NULL,
+    due        REAL    NOT NULL,
+    repeat     TEXT    NOT NULL DEFAULT 'none'   -- none | daily | weekdays | weekly
+);
 CREATE TABLE IF NOT EXISTS mutes (
     guild_id INTEGER NOT NULL,
     user_id  INTEGER NOT NULL,
@@ -244,6 +285,120 @@ class Storage:
         rows = self._db.execute("SELECT guild_id, user_id FROM mutes WHERE until <= ?",
                                 (now,)).fetchall()
         return [(r["guild_id"], r["user_id"]) for r in rows]
+
+    # -- giveaways -------------------------------------------------------------
+    def add_giveaway(self, guild_id: int, channel_id: int, host_id: int, prize: str,
+                     winners: int, ends_at: float) -> int:
+        cur = self._db.execute(
+            "INSERT INTO giveaways (guild_id, channel_id, host_id, prize, winners, ends_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)", (guild_id, channel_id, host_id, prize, winners, ends_at))
+        self._db.commit()
+        return cur.lastrowid
+
+    def set_giveaway_message(self, giveaway_id: int, message_id: int) -> None:
+        self._db.execute("UPDATE giveaways SET message_id = ? WHERE id = ?", (message_id, giveaway_id))
+        self._db.commit()
+
+    def giveaway(self, giveaway_id: int) -> sqlite3.Row | None:
+        return self._db.execute("SELECT * FROM giveaways WHERE id = ?", (giveaway_id,)).fetchone()
+
+    def due_giveaways(self, now: float) -> list[sqlite3.Row]:
+        return self._db.execute("SELECT * FROM giveaways WHERE ended = 0 AND ends_at <= ?",
+                                (now,)).fetchall()
+
+    def end_giveaway(self, giveaway_id: int) -> bool:
+        """Mark ended; False if it already was (so two callers can't both end it)."""
+        cur = self._db.execute("UPDATE giveaways SET ended = 1 WHERE id = ? AND ended = 0",
+                               (giveaway_id,))
+        self._db.commit()
+        return cur.rowcount > 0
+
+    def toggle_entry(self, giveaway_id: int, user_id: int) -> bool:
+        """Enter, or leave if already entered. Returns True if now entered."""
+        cur = self._db.execute("DELETE FROM giveaway_entries WHERE giveaway_id = ? AND user_id = ?",
+                               (giveaway_id, user_id))
+        if cur.rowcount == 0:
+            self._db.execute("INSERT INTO giveaway_entries (giveaway_id, user_id) VALUES (?, ?)",
+                             (giveaway_id, user_id))
+        self._db.commit()
+        return cur.rowcount == 0
+
+    def entries(self, giveaway_id: int, *, include_winners: bool = True) -> list[int]:
+        sql = "SELECT user_id FROM giveaway_entries WHERE giveaway_id = ?"
+        if not include_winners:
+            sql += " AND won = 0"
+        return [r["user_id"] for r in self._db.execute(sql, (giveaway_id,)).fetchall()]
+
+    def mark_winners(self, giveaway_id: int, user_ids: list[int]) -> None:
+        self._db.executemany("UPDATE giveaway_entries SET won = 1 WHERE giveaway_id = ? AND user_id = ?",
+                             [(giveaway_id, u) for u in user_ids])
+        self._db.commit()
+
+    # -- suggestions ------------------------------------------------------------
+    def add_suggestion(self, guild_id: int, author_id: int, text: str) -> int:
+        cur = self._db.execute("INSERT INTO suggestions (guild_id, author_id, text) VALUES (?, ?, ?)",
+                               (guild_id, author_id, text))
+        self._db.commit()
+        return cur.lastrowid
+
+    def set_suggestion_message(self, suggestion_id: int, message_id: int) -> None:
+        self._db.execute("UPDATE suggestions SET message_id = ? WHERE id = ?",
+                         (message_id, suggestion_id))
+        self._db.commit()
+
+    def suggestion(self, suggestion_id: int) -> sqlite3.Row | None:
+        return self._db.execute("SELECT * FROM suggestions WHERE id = ?", (suggestion_id,)).fetchone()
+
+    def set_suggestion_status(self, suggestion_id: int, status: str) -> None:
+        self._db.execute("UPDATE suggestions SET status = ? WHERE id = ?", (status, suggestion_id))
+        self._db.commit()
+
+    # -- birthdays --------------------------------------------------------------
+    def set_birthday(self, guild_id: int, user_id: int, month: int, day: int) -> None:
+        self._db.execute("INSERT OR REPLACE INTO birthdays (guild_id, user_id, month, day) "
+                         "VALUES (?, ?, ?, ?)", (guild_id, user_id, month, day))
+        self._db.commit()
+
+    def remove_birthday(self, guild_id: int, user_id: int) -> bool:
+        cur = self._db.execute("DELETE FROM birthdays WHERE guild_id = ? AND user_id = ?",
+                               (guild_id, user_id))
+        self._db.commit()
+        return cur.rowcount > 0
+
+    def birthdays(self, guild_id: int) -> list[tuple[int, int, int]]:
+        """(user_id, month, day) for everyone in the guild."""
+        rows = self._db.execute("SELECT user_id, month, day FROM birthdays WHERE guild_id = ?",
+                                (guild_id,)).fetchall()
+        return [(r["user_id"], r["month"], r["day"]) for r in rows]
+
+    # -- reminders --------------------------------------------------------------
+    def add_reminder(self, guild_id: int, user_id: int, channel_id: int | None, text: str,
+                     due: float, repeat: str) -> int:
+        cur = self._db.execute(
+            "INSERT INTO reminders (guild_id, user_id, channel_id, text, due, repeat) "
+            "VALUES (?, ?, ?, ?, ?, ?)", (guild_id, user_id, channel_id, text, due, repeat))
+        self._db.commit()
+        return cur.lastrowid
+
+    def reminders_for(self, guild_id: int, user_id: int) -> list[sqlite3.Row]:
+        return self._db.execute("SELECT * FROM reminders WHERE guild_id = ? AND user_id = ? "
+                                "ORDER BY due", (guild_id, user_id)).fetchall()
+
+    def due_reminders(self, now: float) -> list[sqlite3.Row]:
+        return self._db.execute("SELECT * FROM reminders WHERE due <= ?", (now,)).fetchall()
+
+    def reschedule_reminder(self, reminder_id: int, due: float) -> None:
+        self._db.execute("UPDATE reminders SET due = ? WHERE id = ?", (due, reminder_id))
+        self._db.commit()
+
+    def delete_reminder(self, reminder_id: int, user_id: int | None = None) -> bool:
+        sql, args = "DELETE FROM reminders WHERE id = ?", [reminder_id]
+        if user_id is not None:  # only the owner may delete their own
+            sql += " AND user_id = ?"
+            args.append(user_id)
+        cur = self._db.execute(sql, args)
+        self._db.commit()
+        return cur.rowcount > 0
 
     def close(self) -> None:
         self._db.close()

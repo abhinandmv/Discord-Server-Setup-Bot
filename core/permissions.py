@@ -205,6 +205,11 @@ MOD_COMMAND_PERMISSIONS: dict[str, str] = {
     "warnings": "moderate_members",
     "clearwarnings": "moderate_members",
     "purge": "manage_messages",
+    "lockdown": "moderate_members",
+    "unlock": "moderate_members",
+    "giveaway": "moderate_members",
+    "announce": "manage_messages",
+    "remind_channel": "manage_messages",
 }
 
 

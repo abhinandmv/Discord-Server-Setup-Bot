@@ -260,6 +260,8 @@ def build_plan(a: WizardAnswers) -> Plan:
     add_role("staff", a.staff_role or t["staff_role"], staff_style)
     add_role("member", a.member_role or t["member_role"], member_style)
     add_role("muted", defaults["muted"]["name"], defaults["muted"])
+    if "birthdays" in a.features:
+        add_role("birthday", defaults["birthday"]["name"], defaults["birthday"])
     leveling = "leveling" in a.features
     for extra in extras:
         add_role(f"extra:{extra['name'].lower()}", extra["name"], extra)

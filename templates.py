@@ -41,6 +41,10 @@ Special channels (the bot posts in or updates them):
     verify        "I've read the rules" button (verification feature)
     welcome       greets new members
     rules         linked from the verify panel
+    voice_hub     join-to-create voice channel ("Create a room")
+    suggestions   /suggest posts land here, with voting and staff approval
+    birthdays     birthday shout-outs
+    message_log   edited and deleted messages (staff only)
     level_up      level-up announcements
     mod_log       moderation, ticket and join/leave log
     stat_members  voice channel renamed to show the member count
@@ -60,7 +64,7 @@ from __future__ import annotations
 
 PRESETS = {"public", "announcement", "readonly", "staff_only", "tickets", "locked"}
 FOLLOWUPS = {"ticket_role", "subjects", "reaction_roles"}
-SPECIALS = {"reaction_menu", "ticket_panel", "verify", "welcome", "rules", "mod_log", "level_up",
+SPECIALS = {"reaction_menu", "voice_hub", "suggestions", "birthdays", "message_log", "ticket_panel", "verify", "welcome", "rules", "mod_log", "level_up",
             "stat_members", "stat_boosts"}
 
 SEP = "┃"                      # between emoji and name in text channels
@@ -76,6 +80,14 @@ REACTION_PALETTE = ["🔴", "🟠", "🟡", "🟢", "🔵", "🟣", "🟤", "⚫
 # their leading emoji, e.g. "Name color (pick one): 🔴 Red, 🔵 Blue".
 EMOJI_COLORS = {"🔴": 0xE74C3C, "🟠": 0xE67E22, "🟡": 0xF1C40F, "🟢": 0x2ECC71, "🔵": 0x3498DB,
                 "🟣": 0x9B59B6, "🟤": 0x8B5A2B, "⚫": 0x23272A, "⚪": 0xFFFFFF, "🩷": 0xFF9FF3}
+
+# Warning escalation: reaching this many warnings auto-mutes for this long (seconds).
+WARN_ESCALATION: list[tuple[int, int]] = [(3, 3600), (5, 86400), (7, 7 * 86400)]
+
+# AutoMod (Discord's built-in filter). Keyword rule: scam and invite-spam patterns.
+AUTOMOD_BLOCKED_KEYWORDS = ["*free nitro*", "*nitro for free*", "*steam gift*", "*discord-gift*",
+                            "*dlscord*", "*disc0rd*", "*@everyone free*", "*airdrop*"]
+AUTOMOD_MENTION_LIMIT = 5  # unique @mentions in one message before it's blocked
 
 # Leveling: XP per message (random in this range), at most once per cooldown.
 XP_PER_MESSAGE = (15, 25)
@@ -124,6 +136,10 @@ CATEGORIES: dict[str, dict] = {
     "staff":       {"name": "🛡️ STAFF ROOM",    "preset": "staff_only"},
 }
 
+# Join-to-create rooms: the server type's "room_name" ("{user}" = display name).
+DEFAULT_ROOM_NAME = "🔊 {user}'s Room"
+DEFAULT_BIRTHDAY_MESSAGE = "🎂 Happy birthday, {user}! Have an amazing day! 🎉"
+
 # Where free-form channels from the wizard go.
 EXTRA_CHANNEL_CATEGORY = "community"
 SUBJECT_CATEGORY = "subjects"
@@ -143,6 +159,7 @@ DEFAULT_ROLES: dict[str, dict] = {
     "member": {"color": 0x3498DB, "hoist": True},
     "muted": {"name": "🔇 Muted", "color": 0x546E7A},
     "self_assign": {"mentionable": True},
+    "birthday": {"name": "🎂 Birthday", "color": 0xFF69B4, "hoist": True},
 }
 
 # Channels every server gets regardless of type.
@@ -179,10 +196,13 @@ SERVER_TYPES: dict[str, dict] = {
                  "Follow staff instructions. Disagree? Open a ticket."),
             ],
         },
+        "room_name": "🎮 {user}'s Squad",
+        "birthday_message": "🎂 GG! It's {user}'s birthday. Level up, legend! 🎉",
         "welcome_message": "🎮 **{user}** just joined the lobby! Grab a controller and say hi.",
         "category_names": {"info": "📌 HQ", "community": "💬 LOBBY", "events": "🏆 TOURNAMENTS",
                            "voice": "🔊 HANGOUT", "staff": "🛡️ GAME MASTERS"},
-        "renames": {"general": ("💬", "lobby-chat"), "events": ("🏆", "tournaments")},
+        "renames": {"general": ("💬", "lobby-chat"), "events": ("🏆", "tournaments"),
+                    "Create a room": ("➕", "Start a squad")},
         "channels": [
             text("lfg", "gaming", emoji="🔍", topic="Looking for group? Post your game, rank and platform."),
             text("clips", "gaming", emoji="🎬", topic="Share your best plays."),
@@ -193,7 +213,7 @@ SERVER_TYPES: dict[str, dict] = {
             voice("Duo Queue", "game_voice", emoji="⚔️"),
         ],
         "default_features": ["announcements", "rules_welcome", "events", "voice_hangouts",
-                             "media_memes", "staff_area", "reaction_roles", "leveling", "server_stats"],
+                             "media_memes", "staff_area", "reaction_roles", "leveling", "server_stats", "automod", "temp_voice", "suggestions", "birthdays"],
         "default_reaction_roles": "Platform: 🖥️ PC, 🎮 Console, 📱 Mobile\n"
                                   "Favourite games: ⛏️ Minecraft, 🔫 Valorant, 🪂 Fortnite, "
                                   "⚽ EA FC, 🏎️ Racing Games\n"
@@ -229,6 +249,8 @@ SERVER_TYPES: dict[str, dict] = {
                  "Heed the Knights. To appeal, summon the guard with a petition."),
             ],
         },
+        "room_name": "🐉 {user}'s Lair",
+        "birthday_message": "🎂 Hear ye! The realm celebrates {user}'s birthday. The bards sing tonight! 🎉",
         "welcome_message": "🚪 A new traveler approaches the castle gates! Welcome to the realm, "
                            "**{user}**.",
         "category_names": {
@@ -257,6 +279,10 @@ SERVER_TYPES: dict[str, dict] = {
             "Event Stage": ("🏟️", "Grand Arena"),
             "level-ups": ("🏆", "hall-of-heroes"),
             "Members": ("🏰", "Citizens"),
+            "Create a room": ("🔮", "Summon a Lair"),
+            "suggestions": ("📜", "petitions-to-the-crown"),
+            "birthdays": ("🎂", "royal-feasts"),
+            "message-log": ("🪶", "scribes-ledger"),
             "Boosts": ("💎", "Dragon Hoard"),
         },
         "channels": [
@@ -274,7 +300,7 @@ SERVER_TYPES: dict[str, dict] = {
         ],
         "default_features": ["announcements", "rules_welcome", "verification", "events",
                              "voice_hangouts", "media_memes", "support_tickets", "staff_area",
-                             "reaction_roles", "leveling", "server_stats"],
+                             "reaction_roles", "leveling", "server_stats", "automod", "temp_voice", "suggestions", "birthdays"],
         "default_reaction_roles": "Class (pick one): 🔥 Fire Mage, ❄️ Ice Mage, 🌿 Druid, "
                                   "🗡️ Assassin, 🛡️ Paladin\n"
                                   "Allegiance (pick one): 🐲 House of Flame, 🌊 House of Tides, "
@@ -307,6 +333,8 @@ SERVER_TYPES: dict[str, dict] = {
                 ("🎓", "Professors keep order", "Follow staff instructions."),
             ],
         },
+        "room_name": "📚 {user}'s Study Room",
+        "birthday_message": "🎂 Happy birthday, {user}! Take a well-earned study break today. 🎉",
         "welcome_message": "📚 Welcome to class, **{user}**! Grab a seat and open your notes.",
         "category_names": {"info": "🏫 CAMPUS", "community": "☕ COMMON ROOM",
                            "staff": "🎓 FACULTY"},
@@ -322,7 +350,7 @@ SERVER_TYPES: dict[str, dict] = {
         "followups": ["subjects"],
         "default_subjects": "Math, Physics, Chemistry, Biology, Computer Science",
         "default_features": ["announcements", "rules_welcome", "events", "staff_area", "reaction_roles",
-                             "leveling"],
+                             "leveling", "automod", "temp_voice", "suggestions"],
         "default_reaction_roles": "Level (pick one): 🏫 High School, 🎓 University, 💡 Self-learner\n"
                                   "Study style: 🍅 Pomodoro, 👥 Study Buddies, 🎧 Lo-fi Listener\n"
                                   "Schedule (pick one): 🌙 Night Owl, 🌅 Early Bird\n"
@@ -354,6 +382,8 @@ SERVER_TYPES: dict[str, dict] = {
                 ("🛠️", "The Crew has the final say", "Follow staff instructions."),
             ],
         },
+        "room_name": "🎬 {user}'s Studio",
+        "birthday_message": "🎂 It's {user}'s birthday! Drop some love in the chat. 🎉",
         "welcome_message": "🎬 **{user}** just joined the audience! Welcome to the community.",
         "category_names": {"info": "📌 START HERE", "staff": "🛠️ CREW ONLY"},
         "channels": [
@@ -363,7 +393,7 @@ SERVER_TYPES: dict[str, dict] = {
             text("fan-art", "content", emoji="🎨"),
         ],
         "default_features": ["announcements", "rules_welcome", "events", "media_memes",
-                             "staff_area", "reaction_roles", "leveling", "server_stats"],
+                             "staff_area", "reaction_roles", "leveling", "server_stats", "automod", "suggestions", "birthdays"],
         "default_reaction_roles": "Favourite content: 🎮 Gaming Videos, 🎙️ Podcasts, 📹 Vlogs, "
                                   "🖌️ Art Streams\n"
                                   "I'm a: ✏️ Fan Artist, ✂️ Clipper, 💡 Idea Giver\n"
@@ -392,6 +422,8 @@ SERVER_TYPES: dict[str, dict] = {
                 ("🌟", "Guardians keep the peace", "Follow their lead. Something wrong? Open a ticket."),
             ],
         },
+        "room_name": "🛋️ {user}'s Room",
+        "birthday_message": "🎂 Happy birthday, {user}! Cake is on the house today. 🎉",
         "welcome_message": "👋 Hey **{user}**, welcome to the hangout! Pull up a chair.",
         "category_names": {"info": "📌 WELCOME", "community": "💬 HANGOUT"},
         "channels": [
@@ -400,7 +432,7 @@ SERVER_TYPES: dict[str, dict] = {
             text("bot-commands", "community", emoji="🤖"),
         ],
         "default_features": ["announcements", "rules_welcome", "voice_hangouts",
-                             "media_memes", "reaction_roles", "leveling"],
+                             "media_memes", "reaction_roles", "leveling", "automod", "temp_voice", "suggestions", "birthdays"],
         "default_reaction_roles": "Name color (pick one): 🔴 Red, 🔵 Blue, 🟢 Green, 🟣 Purple\n"
                                   "Hobbies: 🎵 Music, 📚 Books, 🎬 Movies, 🍳 Cooking, ✈️ Travel, "
                                   "🐾 Pets\n"
@@ -422,6 +454,8 @@ SERVER_TYPES: dict[str, dict] = {
             {"name": "🌱 New Hire", "color": 0x95A5A6, "level": 3},
             {"name": "🤝 Guest", "color": 0x7F8C8D},
         ],
+        "room_name": "📞 {user}'s Meeting",
+        "birthday_message": "🎂 Happy birthday, {user}! Wishing you a great year ahead from the whole team. 🎉",
         "welcome_message": "💼 Welcome aboard, **{user}**! Read the handbook, pick your department "
                            "and say hi to the team.",
         "rules": {
@@ -460,6 +494,10 @@ SERVER_TYPES: dict[str, dict] = {
             "Lounge": ("☕", "Coffee Break"),
             "Event Stage": ("🎤", "All-Hands"),
             "Members": ("👥", "Team"),
+            "Create a room": ("➕", "Start a meeting"),
+            "suggestions": ("💡", "ideas-board"),
+            "birthdays": ("🎂", "celebrations"),
+            "message-log": ("📝", "edit-history"),
         },
         "channels": [
             text("standup", "work", emoji="📋", topic="Daily standup: yesterday, today, blockers."),
@@ -472,7 +510,7 @@ SERVER_TYPES: dict[str, dict] = {
             voice("Focus Time", "meetings", emoji="🎧"),
         ],
         "default_features": ["announcements", "rules_welcome", "verification", "events",
-                             "voice_hangouts", "media_memes", "support_tickets", "staff_area"],
+                             "voice_hangouts", "media_memes", "support_tickets", "staff_area", "automod", "temp_voice", "suggestions", "birthdays"],
     },
 }
 
@@ -552,6 +590,8 @@ FEATURES: dict[str, dict] = {
             text("staff-chat", "staff", emoji="🛡️"),
             text("mod-log", "staff", emoji="📋", special="mod_log",
                  topic="Moderation actions, tickets, joins and leaves."),
+            text("message-log", "staff", emoji="📝", special="message_log",
+                 topic="Edited and deleted messages."),
             voice("Staff Voice", "staff", emoji="🔒"),
         ],
     },
@@ -564,6 +604,32 @@ FEATURES: dict[str, dict] = {
                  topic="React to a message below to get that role. Remove your reaction to drop it."),
         ],
         "followups": ["reaction_roles"],
+    },
+    "automod": {
+        "label": "AutoMod",
+        "emoji": "🛡️",
+        "description": "Discord's built-in filter blocks slurs, spam, mass mentions and scam links",
+        "channels": [],
+    },
+    "temp_voice": {
+        "label": "Join-to-create voice",
+        "emoji": "➕",
+        "description": "Join one channel to get your own voice room, deleted when empty",
+        "channels": [voice("Create a room", "voice", emoji="➕", special="voice_hub")],
+    },
+    "suggestions": {
+        "label": "Suggestions",
+        "emoji": "💡",
+        "description": "Members post ideas with /suggest, vote on them, staff approve or decline",
+        "channels": [text("suggestions", "community", "readonly", emoji="💡", special="suggestions",
+                          topic="Use /suggest to share an idea. Vote with the reactions.")],
+    },
+    "birthdays": {
+        "label": "Birthdays",
+        "emoji": "🎂",
+        "description": "Members set their birthday and get a role and shout-out on the day",
+        "channels": [text("birthdays", "community", "readonly", emoji="🎂", special="birthdays",
+                          topic="Set yours with /birthday set.")],
     },
     "leveling": {
         "label": "Leveling",
@@ -658,6 +724,9 @@ def validate() -> None:
             for item in items:
                 if not (isinstance(item, tuple) and len(item) == 3 and len(item[1]) <= 240):
                     problems.append(f"server type {key!r}: each rule must be (emoji, rule, details)")
+        for field in ("room_name", "birthday_message"):
+            if "{user}" not in t.get(field, "{user}"):
+                problems.append(f"server type {key!r}: {field} needs a {{user}} placeholder")
         if "{user}" not in t.get("welcome_message", "{user}"):
             problems.append(f"server type {key!r}: welcome_message needs a {{user}} placeholder")
         for cat in t.get("category_names", {}):

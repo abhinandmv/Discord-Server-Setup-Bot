@@ -33,11 +33,14 @@ Still on the **Bot** page:
 | Requires OAuth2 Code Grant | **Off** |
 | Presence Intent | Off |
 | Server Members Intent | **On** |
-| Message Content Intent | Off |
+| Message Content Intent | **On** |
 
-**Server Members Intent** lets the bot see people join and leave, which it needs for welcome messages, verification, giving new members their role, and the join/leave log. Without it the bot stops at startup with a message telling you to turn it on. Click **Save Changes**.
+- **Server Members Intent** lets the bot see people join and leave. It needs this for welcome messages, verification, giving new members their role, and the join/leave log.
+- **Message Content Intent** lets the bot read message text, so the message log can show what an edited or deleted message said.
 
-> Bots in fewer than 100 servers can turn this on freely. Past 100 servers, Discord asks you to apply for it.
+Without both, the bot stops at startup with a message telling you to turn them on. Click **Save Changes**.
+
+> Bots in fewer than 100 servers can turn these on freely. Past 100 servers, Discord asks you to apply for them.
 
 ---
 
@@ -47,7 +50,7 @@ Still on the **Bot** page:
 2. Paste this URL into your browser, replacing `YOUR_APPLICATION_ID` with the ID from Step 1:
 
    ```
-   https://discord.com/oauth2/authorize?client_id=YOUR_APPLICATION_ID&permissions=1477904034896&scope=bot+applications.commands
+   https://discord.com/oauth2/authorize?client_id=YOUR_APPLICATION_ID&permissions=1477904034928&scope=bot+applications.commands
    ```
 
 3. Choose your test server → **Continue** → leave every permission ticked → **Authorize**.
@@ -152,6 +155,10 @@ Invite a second Discord account (or a friend) to the test server, then check:
 - [ ] They **can't** close their own ticket; a mod can, and the category disappears when the last ticket closes
 - [ ] After `/mute @them 1m`, they can't type or speak anywhere, and a minute later they can again
 - [ ] Moderation actions, tickets, joins and leaves appear in the mod-log channel
+- [ ] Editing or deleting a message shows up in the message-log channel
+- [ ] Joining **Create a room** gives you your own voice channel, which disappears when you leave
+- [ ] `/giveaway start prize:Test duration:1m` ends after a minute, and **🔁 Reroll** picks someone new
+- [ ] `/help` from the second account only shows member commands
 - [ ] After a bot restart (Ctrl+C, then `python bot.py`), the role menu, verify and ticket buttons still work
 
 The README has the full testing checklist.
@@ -162,7 +169,9 @@ The README has the full testing checklist.
 
 | Problem | Fix |
 |---|---|
-| "The bot needs the Server Members intent" | Turn on **Server Members Intent** (Step 3), save, and start the bot again. |
+| "The bot needs two privileged intents" | Turn on **Server Members Intent** and **Message Content Intent** (Step 3), save, and start the bot again. |
+| Log repeats "session has been invalidated" and the bot stays offline | An intent from Step 3 is still off, usually **Message Content Intent**. Turn it on, save, and restart. |
+| AutoMod was skipped ("needs Manage Server") | The bot was invited before AutoMod existed. Server Settings → Roles → the bot's role → turn on **Manage Server**, then run `/setup` again. Or re-invite it with the Step 4 link. |
 | `DISCORD_TOKEN is not set` | `.env` is missing or in the wrong folder. It must sit next to `bot.py`. |
 | `LoginFailure: Improper token` | Token copied wrong or reset since. Reset it again (Step 2) and update `.env`. |
 | `/setup` doesn't show up | Check that `TEST_GUILD_ID` is your server's ID and the log says "Synced … to test guild". Restart Discord with **Ctrl+R** (or **Cmd+R**). Make sure the invite URL included `applications.commands`. |

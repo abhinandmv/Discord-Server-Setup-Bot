@@ -1,8 +1,9 @@
-"""Moderation: /mute, /unmute, /warn, /warnings, /clearwarnings and /purge.
+"""Moderation: /mute, /unmute, /warn, /warnings, /clearwarnings, /purge, /lockdown, /unlock.
 
 Muting uses the Muted role /setup created (it can't type, react or speak
 anywhere). Timed mutes are stored in the database, so they still end on time
 after a restart, and leaving and rejoining doesn't shake a mute off.
+Warnings escalate: templates.WARN_ESCALATION auto-mutes at set warning counts.
 Every action is posted to the mod-log channel.
 """
 
@@ -12,6 +13,7 @@ import logging
 import math
 import re
 import time
+from typing import Literal
 
 import discord
 from discord import app_commands
@@ -106,15 +108,11 @@ class Moderation(commands.Cog):
             await interaction.response.send_message(problem or role_problem, ephemeral=True)
             return
 
-        try:
-            await member.add_roles(role, reason=f"Muted by {interaction.user}: {reason or 'no reason'}")
-        except discord.HTTPException as exc:
-            await interaction.response.send_message(f"Couldn't mute them: {exc.text or exc}",
-                                                    ephemeral=True)
+        error = await self.apply_mute(member, role, seconds,
+                                      f"by {interaction.user}: {reason or 'no reason'}")
+        if error:
+            await interaction.response.send_message(error, ephemeral=True)
             return
-        # Indefinite mutes are stored too (never due), so rejoining can't escape them.
-        self.bot.storage.set_mute(guild.id, member.id,
-                                  time.time() + seconds if seconds else math.inf)
 
         length = f" for {human_duration(seconds)}" if seconds else ""
         note = ("\n-# They have Administrator, so channel permissions don't apply to them."
@@ -124,6 +122,18 @@ class Moderation(commands.Cog):
         await log_event(self.bot, guild, "🔇 Member muted",
                         f"{member.mention} ({member}){length}\nBy {interaction.user.mention}\n"
                         f"Reason: {reason or '—'}", colour=ui.YELLOW)
+
+    async def apply_mute(self, member: discord.Member, role: discord.Role, seconds: int | None,
+                         reason: str) -> str | None:
+        """Give the Muted role and remember it. Returns an error message, or None."""
+        try:
+            await member.add_roles(role, reason=f"Muted {reason}"[:500])
+        except discord.HTTPException as exc:
+            return f"Couldn't mute them: {exc.text or exc}"
+        # Indefinite mutes are stored too (never due), so rejoining can't escape them.
+        self.bot.storage.set_mute(member.guild.id, member.id,
+                                  time.time() + seconds if seconds else math.inf)
+        return None
 
     @app_commands.command(name="unmute", description="Remove a member's mute")
     @app_commands.guild_only()
@@ -208,12 +218,28 @@ class Moderation(commands.Cog):
             dm = ""
         except discord.HTTPException:
             dm = " (I couldn't DM them)"
+        escalation = await self._escalate(member, count)
         await interaction.response.send_message(
-            f"⚠️ Warned {member.mention}. They now have **{count}** warning(s).{dm}",
+            f"⚠️ Warned {member.mention}. They now have **{count}** warning(s).{dm}"
+            + (f"\n{escalation}" if escalation else ""),
             allowed_mentions=discord.AllowedMentions.none())
         await log_event(self.bot, guild, "⚠️ Member warned",
                         f"{member.mention} ({member}) · warning #{count}\n"
-                        f"By {interaction.user.mention}\nReason: {reason}", colour=ui.YELLOW)
+                        f"By {interaction.user.mention}\nReason: {reason}"
+                        + (f"\n{escalation}" if escalation else ""), colour=ui.YELLOW)
+
+    async def _escalate(self, member: discord.Member, count: int) -> str | None:
+        """Auto-mute when the warning count hits a threshold in templates.WARN_ESCALATION."""
+        seconds = dict(templates.WARN_ESCALATION).get(count)
+        if not seconds:
+            return None
+        role, problem = self._muted_role(member.guild)
+        if problem:
+            return f"⚠️ Auto-mute skipped: {problem}"
+        error = await self.apply_mute(member, role, seconds, f"automatically ({count} warnings)")
+        if error:
+            return f"⚠️ Auto-mute failed: {error}"
+        return f"🔇 That's {count} warnings, so they're automatically muted for {human_duration(seconds)}."
 
     @app_commands.command(name="warnings", description="List a member's warnings")
     @app_commands.guild_only()
@@ -272,6 +298,161 @@ class Moderation(commands.Cog):
         await log_event(self.bot, interaction.guild, "🧹 Messages purged",
                         f"{len(deleted)} message(s){who} in {channel.mention}\n"
                         f"By {interaction.user.mention}")
+
+    # ------------------------------------------------------------------ #
+    # Lockdown
+    # ------------------------------------------------------------------ #
+    # Permissions switched off for @everyone during a lockdown.
+    LOCK_PERMS = ("send_messages", "send_messages_in_threads", "create_public_threads",
+                  "create_private_threads", "add_reactions", "speak")
+
+    @app_commands.command(name="lockdown", description="Stop members from talking (raid protection)")
+    @app_commands.guild_only()
+    @mod_command("lockdown")
+    @app_commands.describe(scope="Just this channel, or the whole server",
+                           pause_invites="Server only: also stop new people from joining",
+                           reason="Shown in the channel and the mod log")
+    async def lockdown(self, interaction: discord.Interaction,
+                       scope: Literal["channel", "server"] = "channel",
+                       pause_invites: bool = False, reason: str | None = None) -> None:
+        guild = interaction.guild
+        storage = self.bot.storage
+        staff = self._role_setting(guild, "staff_role_id")
+        why = f"Lockdown by {interaction.user}: {reason or 'no reason'}"[:500]
+
+        if scope == "channel":
+            channel = interaction.channel
+            if not isinstance(channel, discord.TextChannel):
+                await interaction.response.send_message("Run this in a text channel.", ephemeral=True)
+                return
+            locked = storage.get_json(guild.id, "lockdown_channels", None) or {}
+            if str(channel.id) in locked:
+                await interaction.response.send_message("This channel is already locked.", ephemeral=True)
+                return
+            if not channel.permissions_for(guild.me).manage_roles:
+                await interaction.response.send_message("I can't change permissions in this channel.",
+                                                        ephemeral=True)
+                return
+            # Remember the exact previous values so /unlock restores them, not a guess.
+            saved = {"everyone": self._overwrite_values(channel, guild.default_role)}
+            ow = channel.overwrites_for(guild.default_role)
+            for perm in self.LOCK_PERMS:
+                setattr(ow, perm, False)
+            try:
+                await channel.set_permissions(guild.default_role, overwrite=ow, reason=why)
+                if staff is not None:
+                    saved["staff"] = self._overwrite_values(channel, staff)
+                    sow = channel.overwrites_for(staff)
+                    sow.send_messages = True
+                    await channel.set_permissions(staff, overwrite=sow, reason=why)
+            except discord.HTTPException as exc:
+                await interaction.response.send_message(f"Couldn't lock this channel: {exc.text or exc}",
+                                                        ephemeral=True)
+                return
+            locked[str(channel.id)] = saved
+            storage.set_json(guild.id, "lockdown_channels", locked)
+            where = channel.mention
+        else:
+            if storage.get_json(guild.id, "lockdown_server", None):
+                await interaction.response.send_message("The server is already locked.", ephemeral=True)
+                return
+            everyone = guild.default_role
+            saved = {"everyone": {p: getattr(everyone.permissions, p) for p in self.LOCK_PERMS}}
+            try:
+                perms = everyone.permissions
+                perms.update(**{p: False for p in self.LOCK_PERMS})
+                await everyone.edit(permissions=perms, reason=why)
+                # Staff normally talk through @everyone's permissions; keep them talking.
+                if staff is not None and staff < guild.me.top_role and not staff.permissions.send_messages:
+                    saved["staff_send"] = True
+                    sperms = staff.permissions
+                    sperms.update(send_messages=True, speak=True)
+                    await staff.edit(permissions=sperms, reason=why)
+                if pause_invites:
+                    if guild.me.guild_permissions.manage_guild:
+                        await guild.edit(invites_disabled=True, reason=why)
+                        saved["invites"] = True
+                    else:
+                        saved["invites_note"] = True
+            except discord.HTTPException as exc:
+                await interaction.response.send_message(f"Couldn't lock the server: {exc.text or exc}",
+                                                        ephemeral=True)
+                return
+            storage.set_json(guild.id, "lockdown_server", saved)
+            where = "the whole server"
+
+        text = f"🔒 **Locked down {where}.** Only staff can talk until a moderator runs `/unlock`."
+        if reason:
+            text += f"\nReason: {reason}"
+        if scope == "server" and saved.get("invites"):
+            text += "\nNew joins are paused."
+        if scope == "server" and saved.get("invites_note"):
+            text += "\n-# I couldn't pause invites: I need the Manage Server permission."
+        await interaction.response.send_message(text)
+        await log_event(self.bot, guild, "🔒 Lockdown", f"{where} by {interaction.user.mention}\n"
+                        f"Reason: {reason or '—'}", colour=ui.RED)
+
+    @app_commands.command(name="unlock", description="End a lockdown")
+    @app_commands.guild_only()
+    @mod_command("unlock")
+    @app_commands.describe(scope="Just this channel, or the whole server")
+    async def unlock(self, interaction: discord.Interaction,
+                     scope: Literal["channel", "server"] = "channel") -> None:
+        guild = interaction.guild
+        storage = self.bot.storage
+        why = f"Unlocked by {interaction.user}"
+        try:
+            if scope == "channel":
+                channel = interaction.channel
+                locked = storage.get_json(guild.id, "lockdown_channels", None) or {}
+                saved = locked.get(str(getattr(channel, "id", 0)))
+                if saved is None:
+                    await interaction.response.send_message("This channel isn't locked.", ephemeral=True)
+                    return
+                await self._restore_overwrite(channel, guild.default_role, saved["everyone"], why)
+                staff = self._role_setting(guild, "staff_role_id")
+                if staff is not None and "staff" in saved:
+                    await self._restore_overwrite(channel, staff, saved["staff"], why)
+                del locked[str(channel.id)]
+                storage.set_json(guild.id, "lockdown_channels", locked)
+                where = channel.mention
+            else:
+                saved = storage.get_json(guild.id, "lockdown_server", None)
+                if not saved:
+                    await interaction.response.send_message("The server isn't locked.", ephemeral=True)
+                    return
+                perms = guild.default_role.permissions
+                perms.update(**saved["everyone"])
+                await guild.default_role.edit(permissions=perms, reason=why)
+                staff = self._role_setting(guild, "staff_role_id")
+                if saved.get("staff_send") and staff is not None and staff < guild.me.top_role:
+                    sperms = staff.permissions
+                    sperms.update(send_messages=False, speak=False)
+                    await staff.edit(permissions=sperms, reason=why)
+                if saved.get("invites"):
+                    await guild.edit(invites_disabled=False, reason=why)
+                storage.delete_setting(guild.id, "lockdown_server")
+                where = "the whole server"
+        except discord.HTTPException as exc:
+            await interaction.response.send_message(f"Couldn't unlock: {exc.text or exc}", ephemeral=True)
+            return
+        await interaction.response.send_message(f"🔓 **Unlocked {where}.** Everyone can talk again.")
+        await log_event(self.bot, guild, "🔓 Lockdown ended", f"{where} by {interaction.user.mention}",
+                        colour=ui.GREEN)
+
+    def _role_setting(self, guild: discord.Guild, key: str) -> discord.Role | None:
+        raw = self.bot.storage.get_setting(guild.id, key)
+        return guild.get_role(int(raw)) if raw and raw.isdigit() else None
+
+    def _overwrite_values(self, channel: discord.abc.GuildChannel, target) -> dict:
+        ow = channel.overwrites_for(target)
+        return {p: getattr(ow, p) for p in self.LOCK_PERMS + ("send_messages",)}
+
+    async def _restore_overwrite(self, channel, target, values: dict, reason: str) -> None:
+        ow = channel.overwrites_for(target)
+        for perm, value in values.items():
+            setattr(ow, perm, value)
+        await channel.set_permissions(target, overwrite=None if ow.is_empty() else ow, reason=reason)
 
 
 async def setup(bot: commands.Bot) -> None:

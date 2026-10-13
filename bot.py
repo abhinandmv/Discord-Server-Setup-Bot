@@ -20,17 +20,21 @@ log = logging.getLogger("setup_bot")
 
 EXTENSIONS = ("cogs.wizard", "cogs.reset", "cogs.role_menu", "cogs.tickets", "cogs.welcome",
               "cogs.leveling", "cogs.stats", "cogs.moderation", "cogs.backup",
-              "cogs.server_templates")
+              "cogs.server_templates", "cogs.temp_voice", "cogs.giveaways", "cogs.suggestions",
+              "cogs.birthdays", "cogs.announce", "cogs.reminders", "cogs.message_log", "cogs.help")
 
 
 class SetupBot(commands.Bot):
     def __init__(self) -> None:
-        # Server Members is the only privileged intent needed (welcome messages,
-        # verification, auto-role, join/leave log). Message Content is NOT needed:
-        # leveling only counts messages.
+        # Privileged intents (turn both on in the Developer Portal -> Bot):
+        # - Server Members: welcome messages, verification, auto-role, join/leave log
+        # - Message Content: logging the text of edited and deleted messages
         intents = discord.Intents.default()
         intents.members = True
-        super().__init__(command_prefix=commands.when_mentioned, intents=intents, help_command=None)
+        intents.message_content = True
+        # Remember more recent messages, so deletes and edits can show the old text.
+        super().__init__(command_prefix=commands.when_mentioned, intents=intents, help_command=None,
+                         max_messages=5000)
         self.storage = Storage(config.DATABASE_PATH)
         self._guild_locks: defaultdict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
 
@@ -42,6 +46,7 @@ class SetupBot(commands.Bot):
         for ext in EXTENSIONS:
             await self.load_extension(ext)
         self.tree.on_error = self.on_app_command_error
+        self._watchdog = asyncio.create_task(self._warn_if_not_ready())
 
         if config.TEST_GUILD_ID:
             guild = discord.Object(id=config.TEST_GUILD_ID)
@@ -51,6 +56,16 @@ class SetupBot(commands.Bot):
         else:
             synced = await self.tree.sync()
             log.info("Synced %d global command(s) (may take up to an hour to appear)", len(synced))
+
+    async def _warn_if_not_ready(self) -> None:
+        # A privileged intent that's switched off in the Developer Portal doesn't
+        # always produce an error: Discord can just keep resetting the session.
+        await asyncio.sleep(45)
+        if not self.is_ready():
+            log.error("Still not connected after 45 seconds. The most likely cause is a privileged "
+                      "intent that's switched off: Developer Portal -> your application -> Bot -> "
+                      "turn on BOTH 'Server Members Intent' and 'Message Content Intent', save, "
+                      "then restart the bot.")
 
     async def on_ready(self) -> None:
         log.info("Logged in as %s (id %s) in %d guild(s)", self.user, self.user.id, len(self.guilds))
@@ -90,9 +105,9 @@ def main() -> None:
     try:
         SetupBot().run(config.DISCORD_TOKEN, log_handler=None)
     except discord.PrivilegedIntentsRequired:
-        sys.exit("The bot needs the Server Members intent. Turn it on in the Developer Portal: "
-                 "your application -> Bot -> Privileged Gateway Intents -> Server Members Intent, "
-                 "then save and start the bot again.")
+        sys.exit("The bot needs two privileged intents. In the Developer Portal open your "
+                 "application -> Bot -> Privileged Gateway Intents, turn on BOTH 'Server Members "
+                 "Intent' and 'Message Content Intent', save, and start the bot again.")
 
 
 if __name__ == "__main__":
