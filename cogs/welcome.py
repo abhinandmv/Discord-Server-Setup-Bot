@@ -150,7 +150,7 @@ class Welcome(commands.Cog):
             embed.set_footer(text=f"Member #{member.guild.member_count:,}")
         try:
             await channel.send(content=member.mention, embed=embed,
-                               allowed_mentions=discord.AllowedMentions(users=True))
+                               allowed_mentions=ui.PING_USERS)
         except discord.HTTPException as exc:
             log.info("Couldn't post welcome in %s: %s", member.guild.id, exc)
 

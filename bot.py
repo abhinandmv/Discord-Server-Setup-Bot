@@ -33,8 +33,13 @@ class SetupBot(commands.Bot):
         intents.members = True
         intents.message_content = True
         # Remember more recent messages, so deletes and edits can show the old text.
+        # Default for every message: user mentions may ping, but never @everyone,
+        # @here or roles unless a message explicitly allows it (e.g. /announce).
+        # Text that users typed (reasons, prizes, ideas) can't mass-ping that way.
         super().__init__(command_prefix=commands.when_mentioned, intents=intents, help_command=None,
-                         max_messages=5000)
+                         max_messages=5000,
+                         allowed_mentions=discord.AllowedMentions(everyone=False, roles=False,
+                                                                  users=True))
         self.storage = Storage(config.DATABASE_PATH)
         self._guild_locks: defaultdict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
 

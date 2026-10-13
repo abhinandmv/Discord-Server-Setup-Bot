@@ -764,7 +764,7 @@ class Wizard(commands.Cog):
             if not await reporter.finish(embed) and result.home_channel:
                 try:
                     await result.home_channel.send(content=interaction.user.mention, embed=embed,
-                                                   allowed_mentions=discord.AllowedMentions(users=True))
+                                                   allowed_mentions=ui.PING_USERS)
                 except discord.HTTPException as exc:
                     log.warning("Couldn't post setup summary: %s", exc)
 

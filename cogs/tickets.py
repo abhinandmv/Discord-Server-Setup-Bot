@@ -169,7 +169,7 @@ class Tickets(commands.Cog):
                             "The team will close this ticket once it's resolved.",
                 colour=ui.BLURPLE),
             view=view,
-            allowed_mentions=discord.AllowedMentions(users=True, roles=True))
+            allowed_mentions=discord.AllowedMentions(everyone=False, users=True, roles=True))
         await interaction.followup.send(f"Ticket created: {channel.mention}", ephemeral=True)
         await log_event(self.bot, guild, "🎫 Ticket opened", f"{channel.mention} by {user.mention} ({user})")
 

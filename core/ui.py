@@ -14,6 +14,10 @@ GREEN = 0x57F287
 YELLOW = 0xFEE75C
 RED = 0xED4245
 
+# Ping the users mentioned, never @everyone/@here or roles. Note that
+# discord.AllowedMentions(users=True) alone still allows everyone and roles.
+PING_USERS = discord.AllowedMentions(everyone=False, roles=False, users=True)
+
 
 def clip(text: str, limit: int = 1024) -> str:
     return text if len(text) <= limit else text[: limit - 2] + " …"

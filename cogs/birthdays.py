@@ -156,7 +156,7 @@ class Birthdays(commands.Cog):
             embed.set_thumbnail(url=member.display_avatar.url)
             try:
                 await channel.send(content=member.mention, embed=embed,
-                                   allowed_mentions=discord.AllowedMentions(users=True))
+                                   allowed_mentions=ui.PING_USERS)
             except discord.HTTPException as exc:
                 log.info("Couldn't post birthday in %s: %s", guild.id, exc)
 

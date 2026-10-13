@@ -52,7 +52,8 @@ class AnnounceModal(discord.ui.Modal, title="New announcement"):
         try:
             message = await self.channel.send(
                 content=content, embed=embed,
-                allowed_mentions=discord.AllowedMentions(everyone=content is not None))
+                allowed_mentions=discord.AllowedMentions(
+                    everyone=content is not None, roles=False, users=False))
         except discord.HTTPException as exc:
             await interaction.response.send_message(f"Couldn't post it: {exc.text or exc}",
                                                     ephemeral=True)

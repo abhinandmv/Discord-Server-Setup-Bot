@@ -203,7 +203,7 @@ class Giveaways(commands.Cog):
                 await message.reply(
                     f"🎉 Congratulations {', '.join(f'<@{w}>' for w in winners)}! You won "
                     f"**{row['prize']}**. Contact <@{row['host_id']}> to claim it.",
-                    allowed_mentions=discord.AllowedMentions(users=True))
+                    allowed_mentions=ui.PING_USERS)
             else:
                 await message.reply("Nobody entered, so there's no winner. 😢")
         except discord.HTTPException as exc:
@@ -228,7 +228,7 @@ class Giveaways(commands.Cog):
             return
         await interaction.response.send_message(
             f"🔁 Rerolled! The new winner of **{row['prize']}** is <@{new[0]}>. Congratulations! 🎉",
-            allowed_mentions=discord.AllowedMentions(users=True))
+            allowed_mentions=ui.PING_USERS)
         await log_event(self.bot, interaction.guild, "🔁 Giveaway rerolled",
                         f"**{row['prize']}** · new winner <@{new[0]}> · by {interaction.user.mention}")
 
