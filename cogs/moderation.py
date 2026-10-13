@@ -388,7 +388,8 @@ class Moderation(commands.Cog):
             text += "\nNew joins are paused."
         if scope == "server" and saved.get("invites_note"):
             text += "\n-# I couldn't pause invites: I need the Manage Server permission."
-        await interaction.response.send_message(text)
+        # The reason is typed by a moderator: never let it ping @everyone or roles.
+        await interaction.response.send_message(text, allowed_mentions=discord.AllowedMentions.none())
         await log_event(self.bot, guild, "🔒 Lockdown", f"{where} by {interaction.user.mention}\n"
                         f"Reason: {reason or '—'}", colour=ui.RED)
 
@@ -436,7 +437,8 @@ class Moderation(commands.Cog):
         except discord.HTTPException as exc:
             await interaction.response.send_message(f"Couldn't unlock: {exc.text or exc}", ephemeral=True)
             return
-        await interaction.response.send_message(f"🔓 **Unlocked {where}.** Everyone can talk again.")
+        await interaction.response.send_message(f"🔓 **Unlocked {where}.** Everyone can talk again.",
+                                                allowed_mentions=discord.AllowedMentions.none())
         await log_event(self.bot, guild, "🔓 Lockdown ended", f"{where} by {interaction.user.mention}",
                         colour=ui.GREEN)
 
